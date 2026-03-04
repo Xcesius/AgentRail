@@ -8,14 +8,14 @@ import (
 	"strconv"
 	"strings"
 
-	execmod "codex-tool/internal/exec"
-	filesmod "codex-tool/internal/files"
-	patchmod "codex-tool/internal/patch"
-	"codex-tool/internal/protocol"
-	readmod "codex-tool/internal/read"
-	searchmod "codex-tool/internal/search"
-	"codex-tool/internal/workspace"
-	writemod "codex-tool/internal/write"
+	execmod "agentrail/internal/exec"
+	filesmod "agentrail/internal/files"
+	patchmod "agentrail/internal/patch"
+	"agentrail/internal/protocol"
+	readmod "agentrail/internal/read"
+	searchmod "agentrail/internal/search"
+	"agentrail/internal/workspace"
+	writemod "agentrail/internal/write"
 )
 
 const maxStdinBytes = 64 * 1024 * 1024

@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"codex-tool/internal/protocol"
+	"agentrail/internal/protocol"
 )
 
 type HunkLine struct {

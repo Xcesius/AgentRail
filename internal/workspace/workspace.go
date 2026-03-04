@@ -8,7 +8,7 @@ import (
 	"runtime"
 	"strings"
 
-	"codex-tool/internal/protocol"
+	"agentrail/internal/protocol"
 )
 
 type Manager struct {

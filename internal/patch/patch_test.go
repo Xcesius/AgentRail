@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"codex-tool/internal/protocol"
-	"codex-tool/internal/workspace"
+	"agentrail/internal/protocol"
+	"agentrail/internal/workspace"
 )
 
 func TestPatchContextMismatch(t *testing.T) {

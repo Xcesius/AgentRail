@@ -14,9 +14,9 @@ import (
 	"sync"
 	"sync/atomic"
 
-	filesmod "codex-tool/internal/files"
-	"codex-tool/internal/protocol"
-	"codex-tool/internal/workspace"
+	filesmod "agentrail/internal/files"
+	"agentrail/internal/protocol"
+	"agentrail/internal/workspace"
 )
 
 type Options struct {

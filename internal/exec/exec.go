@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"codex-tool/internal/protocol"
+	"agentrail/internal/protocol"
 )
 
 type Options struct {

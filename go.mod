@@ -1,3 +1,3 @@
-module codex-tool
+module agentrail
 
 go 1.25.5

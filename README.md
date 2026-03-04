@@ -1,6 +1,6 @@
-# codex-tool
+# agentrail
 
-`codex-tool` is a high-performance command-line execution adapter for AI coding agents.
+`agentrail` is a high-performance command-line execution adapter for AI coding agents.
 
 - Single self-contained Go binary for Windows
 - JSON-only stdout protocol
@@ -9,12 +9,12 @@
 
 ## Commands
 
-- `codex-tool search <query>`
-- `codex-tool files`
-- `codex-tool read <path>`
-- `codex-tool write <path>`
-- `codex-tool patch`
-- `codex-tool exec -- <argv...>`
+- `agentrail search <query>`
+- `agentrail files`
+- `agentrail read <path>`
+- `agentrail write <path>`
+- `agentrail patch`
+- `agentrail exec -- <argv...>`
 
 Global flags:
 
@@ -95,37 +95,37 @@ All stdout responses are a single JSON object. Human diagnostics go to stderr.
 ### files
 
 ```bash
-codex-tool files
+agentrail files
 ```
 
 ### search
 
 ```bash
-codex-tool search "TODO"
+agentrail search "TODO"
 ```
 
 ### read
 
 ```bash
-codex-tool read "README.md"
+agentrail read "README.md"
 ```
 
 ### write
 
 ```bash
-echo "hello" | codex-tool write "notes.txt"
+echo "hello" | agentrail write "notes.txt"
 ```
 
 ### patch
 
 ```bash
-cat change.diff | codex-tool patch
+cat change.diff | agentrail patch
 ```
 
 ### exec
 
 ```bash
-codex-tool exec -- git status
+agentrail exec -- git status
 ```
 
 ## JSON Examples
@@ -175,7 +175,7 @@ codex-tool exec -- git status
 set CGO_ENABLED=0
 set GOOS=windows
 set GOARCH=amd64
-go build -trimpath -ldflags "-s -w -buildid=" -o bin/codex-tool.exe ./cmd
+go build -trimpath -ldflags "-s -w -buildid=" -o bin/agentrail.exe ./cmd
 ```
 
 Notes:

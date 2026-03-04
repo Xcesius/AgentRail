@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"codex-tool/internal/protocol"
-	"codex-tool/internal/workspace"
-	writemod "codex-tool/internal/write"
+	"agentrail/internal/protocol"
+	"agentrail/internal/workspace"
+	writemod "agentrail/internal/write"
 )
 
 type FileResult struct {

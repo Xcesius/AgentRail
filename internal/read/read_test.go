@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"codex-tool/internal/protocol"
+	"agentrail/internal/protocol"
 )
 
 func TestReadPartialLines(t *testing.T) {

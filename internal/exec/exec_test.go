@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"codex-tool/internal/protocol"
+	"agentrail/internal/protocol"
 )
 
 func TestRunExecPreservesArgvWithoutShell(t *testing.T) {

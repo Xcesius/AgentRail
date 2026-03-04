@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"codex-tool/internal/protocol"
+	"agentrail/internal/protocol"
 )
 
 func WriteFileAtomic(path string, content []byte, createDirs bool) (int, error) {
@@ -30,7 +30,7 @@ func WriteFileAtomic(path string, content []byte, createDirs bool) (int, error) 
 		return 0, protocol.Err(protocol.CodeInvalidRequest, "unable to inspect target file")
 	}
 
-	tmp, err := os.CreateTemp(dir, ".codex-tool-*")
+	tmp, err := os.CreateTemp(dir, ".agentrail-*")
 	if err != nil {
 		return 0, protocol.Err(protocol.CodeInvalidRequest, "unable to create temp file")
 	}

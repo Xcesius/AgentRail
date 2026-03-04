@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"sort"
 
-	"codex-tool/internal/protocol"
-	"codex-tool/internal/workspace"
+	"agentrail/internal/protocol"
+	"agentrail/internal/workspace"
 )
 
 func ListFiles(root string, manager *workspace.Manager) ([]string, error) {

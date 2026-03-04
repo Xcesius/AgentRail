@@ -7,7 +7,7 @@ import (
 	"io"
 	"os"
 
-	"codex-tool/internal/protocol"
+	"agentrail/internal/protocol"
 )
 
 const defaultMaxBytes int64 = 1024 * 1024
