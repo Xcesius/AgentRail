@@ -152,11 +152,13 @@ func handleJSON(manager *workspace.Manager, allowOutsideFlag bool, payload []byt
 			return respond(failure(action, readErr, nil))
 		}
 		fields := map[string]any{
-			"path":       manager.RelativePath(resolved),
-			"content":    result.Content,
-			"start_line": result.StartLine,
-			"end_line":   result.EndLine,
-			"truncated":  result.Truncated,
+			"path":            manager.RelativePath(resolved),
+			"content":         result.Content,
+			"start_line":      result.StartLine,
+			"end_line":        result.EndLine,
+			"truncated":       result.Truncated,
+			"has_more":        result.HasMore,
+			"next_start_line": result.NextStartLine,
 		}
 		return respond(protocol.Success(action, fields))
 	case "write":
@@ -260,11 +262,13 @@ func handleCLI(manager *workspace.Manager, globals globalOptions) map[string]any
 			return failure(cmd, readErr, nil)
 		}
 		return protocol.Success(cmd, map[string]any{
-			"path":       manager.RelativePath(resolved),
-			"content":    result.Content,
-			"start_line": result.StartLine,
-			"end_line":   result.EndLine,
-			"truncated":  result.Truncated,
+			"path":            manager.RelativePath(resolved),
+			"content":         result.Content,
+			"start_line":      result.StartLine,
+			"end_line":        result.EndLine,
+			"truncated":       result.Truncated,
+			"has_more":        result.HasMore,
+			"next_start_line": result.NextStartLine,
 		})
 	case "write":
 		if len(args) != 1 {

@@ -191,7 +191,9 @@ Response:
   "content": "...",
   "start_line": 1,
   "end_line": 42,
-  "truncated": false
+  "truncated": false,
+  "has_more": false,
+  "next_start_line": 0
 }
 ```
 
@@ -199,8 +201,13 @@ Rules:
 - `path` is required.
 - `start_line <= 0` is coerced to `1`.
 - `end_line == 0` means read to EOF.
-- Binary file reads **MUST** return `binary_file`.
-- Output **MUST** be truncated at `max_bytes` with `truncated=true`.
+- `max_bytes` is evaluated against raw on-disk bytes, including `\n` or `\r\n`.
+- Returned `content` **MUST** contain only complete lines.
+- If the next selected unread line would exceed `max_bytes`, the tool **MUST** stop before that line, set `truncated=true`, `has_more=true`, and `next_start_line` to the first unread line.
+- If the first selected unread line alone exceeds `max_bytes`, the tool **MUST** return `too_large`.
+- `has_more=true` means additional readable content remains beyond the returned slice.
+- `next_start_line` **MUST** be `0` when `has_more=false`.
+- Binary file reads **MUST** return `binary_file`. Unsupported encodings such as UTF-16 are treated as binary in v1.
 
 ## `write`
 
@@ -322,6 +329,8 @@ Rules:
   - write/patch/exec cwd: always `path_denied`
 - Symlink escape outside workspace follows same policy as above after canonical resolution.
 - File exactly at `read.max_bytes` returns `truncated=false` if fully included.
+- `read.start_line` beyond EOF returns empty `content`, `end_line=start_line-1`, `has_more=false`, and `next_start_line=0`.
+- Paginated reads assume the target file is immutable or append-only across requests; no consistency token is provided.
 - Search on binary file returns no match entry and no error entry.
 - Patch stale context returns per-file failure and top-level `patch_failed`.
 - Timeout during exec after partial output returns `timeout` with partial captured output.

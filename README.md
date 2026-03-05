@@ -61,7 +61,9 @@ All stdout responses are a single JSON object. Human diagnostics go to stderr.
   "content": "...",
   "start_line": 1,
   "end_line": 12,
-  "truncated": false
+  "truncated": false,
+  "has_more": false,
+  "next_start_line": 0
 }
 ```
 
@@ -110,6 +112,8 @@ agentrail search "TODO"
 ```bash
 agentrail read "README.md"
 ```
+
+`read` pages on full-line boundaries and returns `has_more` plus `next_start_line` for deterministic continuation.
 
 ### write
 

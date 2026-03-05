@@ -20,10 +20,12 @@ type Options struct {
 }
 
 type Result struct {
-	Content   string `json:"content"`
-	StartLine int    `json:"start_line"`
-	EndLine   int    `json:"end_line"`
-	Truncated bool   `json:"truncated"`
+	Content       string `json:"content"`
+	StartLine     int    `json:"start_line"`
+	EndLine       int    `json:"end_line"`
+	Truncated     bool   `json:"truncated"`
+	HasMore       bool   `json:"has_more"`
+	NextStartLine int    `json:"next_start_line"`
 }
 
 func ReadFile(path string, options Options) (Result, error) {
@@ -67,6 +69,8 @@ func ReadFile(path string, options Options) (Result, error) {
 	lineNo := 0
 	lastLine := options.StartLine - 1
 	truncated := false
+	hasMore := false
+	nextStartLine := 0
 
 	for {
 		line, readErr := reader.ReadBytes('\n')
@@ -74,18 +78,19 @@ func ReadFile(path string, options Options) (Result, error) {
 			lineNo++
 			if lineNo >= options.StartLine {
 				if options.EndLine > 0 && lineNo > options.EndLine {
+					hasMore = true
+					nextStartLine = lineNo
 					break
 				}
 
 				remaining := options.MaxBytes - int64(out.Len())
-				if remaining <= 0 {
-					truncated = true
-					break
-				}
 				if int64(len(line)) > remaining {
-					out.Write(line[:remaining])
+					if out.Len() == 0 {
+						return Result{}, protocol.Err(protocol.CodeTooLarge, "first selected line exceeds max_bytes")
+					}
 					truncated = true
-					lastLine = lineNo
+					hasMore = true
+					nextStartLine = lineNo
 					break
 				}
 				out.Write(line)
@@ -101,9 +106,11 @@ func ReadFile(path string, options Options) (Result, error) {
 	}
 
 	return Result{
-		Content:   out.String(),
-		StartLine: options.StartLine,
-		EndLine:   lastLine,
-		Truncated: truncated,
+		Content:       out.String(),
+		StartLine:     options.StartLine,
+		EndLine:       lastLine,
+		Truncated:     truncated,
+		HasMore:       hasMore,
+		NextStartLine: nextStartLine,
 	}, nil
 }
