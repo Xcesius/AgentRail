@@ -82,6 +82,14 @@ func handleJSON(manager *workspace.Manager, allowOutsideFlag bool, payload []byt
 		return protocol.Failure("json", code, message, nil)
 	}
 
+	requestID := strings.TrimSpace(req.RequestID)
+	respond := func(resp map[string]any) map[string]any {
+		if requestID != "" {
+			resp["request_id"] = requestID
+		}
+		return resp
+	}
+
 	action := strings.ToLower(req.Action)
 	allowOutside := allowOutsideFlag || req.AllowOutsideWorkspace
 
@@ -93,13 +101,13 @@ func handleJSON(manager *workspace.Manager, allowOutsideFlag bool, payload []byt
 		}
 		root, resolveErr := manager.ResolveDirPath(base, allowOutside)
 		if resolveErr != nil {
-			return failure(action, resolveErr, nil)
+			return respond(failure(action, resolveErr, nil))
 		}
 		paths, listErr := filesmod.ListFiles(root, manager)
 		if listErr != nil {
-			return failure(action, listErr, nil)
+			return respond(failure(action, listErr, nil))
 		}
-		return protocol.Success(action, map[string]any{"paths": paths})
+		return respond(protocol.Success(action, map[string]any{"paths": paths}))
 	case "search":
 		base := req.Path
 		if base == "" {
@@ -107,7 +115,7 @@ func handleJSON(manager *workspace.Manager, allowOutsideFlag bool, payload []byt
 		}
 		root, resolveErr := manager.ResolveDirPath(base, allowOutside)
 		if resolveErr != nil {
-			return failure(action, resolveErr, nil)
+			return respond(failure(action, resolveErr, nil))
 		}
 		deterministic := true
 		if req.Deterministic != nil {
@@ -124,16 +132,16 @@ func handleJSON(manager *workspace.Manager, allowOutsideFlag bool, payload []byt
 			Deterministic: deterministic,
 		})
 		if searchErr != nil {
-			return failure(action, searchErr, nil)
+			return respond(failure(action, searchErr, nil))
 		}
-		return protocol.Success(action, map[string]any{"matches": matches})
+		return respond(protocol.Success(action, map[string]any{"matches": matches}))
 	case "read":
 		if strings.TrimSpace(req.Path) == "" {
-			return protocol.Failure(action, protocol.CodeInvalidRequest, "path is required", nil)
+			return respond(protocol.Failure(action, protocol.CodeInvalidRequest, "path is required", nil))
 		}
 		resolved, resolveErr := manager.ResolveReadPath(req.Path, allowOutside)
 		if resolveErr != nil {
-			return failure(action, resolveErr, nil)
+			return respond(failure(action, resolveErr, nil))
 		}
 		result, readErr := readmod.ReadFile(resolved, readmod.Options{
 			StartLine: req.StartLine,
@@ -141,7 +149,7 @@ func handleJSON(manager *workspace.Manager, allowOutsideFlag bool, payload []byt
 			MaxBytes:  req.MaxBytes,
 		})
 		if readErr != nil {
-			return failure(action, readErr, nil)
+			return respond(failure(action, readErr, nil))
 		}
 		fields := map[string]any{
 			"path":       manager.RelativePath(resolved),
@@ -150,29 +158,29 @@ func handleJSON(manager *workspace.Manager, allowOutsideFlag bool, payload []byt
 			"end_line":   result.EndLine,
 			"truncated":  result.Truncated,
 		}
-		return protocol.Success(action, fields)
+		return respond(protocol.Success(action, fields))
 	case "write":
 		if strings.TrimSpace(req.Path) == "" {
-			return protocol.Failure(action, protocol.CodeInvalidRequest, "path is required", nil)
+			return respond(protocol.Failure(action, protocol.CodeInvalidRequest, "path is required", nil))
 		}
 		if req.Content == nil {
-			return protocol.Failure(action, protocol.CodeInvalidRequest, "content is required in JSON mode", nil)
+			return respond(protocol.Failure(action, protocol.CodeInvalidRequest, "content is required in JSON mode", nil))
 		}
 		resolved, resolveErr := manager.ResolveWritePath(req.Path)
 		if resolveErr != nil {
-			return failure(action, resolveErr, nil)
+			return respond(failure(action, resolveErr, nil))
 		}
 		written, writeErr := writemod.WriteFileAtomic(resolved, []byte(*req.Content), req.CreateDirs)
 		if writeErr != nil {
-			return failure(action, writeErr, nil)
+			return respond(failure(action, writeErr, nil))
 		}
-		return protocol.Success(action, map[string]any{
+		return respond(protocol.Success(action, map[string]any{
 			"path":          manager.RelativePath(resolved),
 			"bytes_written": written,
-		})
+		}))
 	case "patch":
 		if req.Diff == nil {
-			return protocol.Failure(action, protocol.CodeInvalidRequest, "diff is required in JSON mode", nil)
+			return respond(protocol.Failure(action, protocol.CodeInvalidRequest, "diff is required in JSON mode", nil))
 		}
 		applyResult, patchErr := patchmod.Apply(manager, *req.Diff)
 		fields := map[string]any{
@@ -181,13 +189,13 @@ func handleJSON(manager *workspace.Manager, allowOutsideFlag bool, payload []byt
 			"results":       applyResult.Results,
 		}
 		if patchErr != nil {
-			return failure(action, patchErr, fields)
+			return respond(failure(action, patchErr, fields))
 		}
-		return protocol.Success(action, fields)
+		return respond(protocol.Success(action, fields))
 	case "exec":
 		cwd, cwdErr := manager.ResolveExecCWD(req.CWD)
 		if cwdErr != nil {
-			return failure(action, cwdErr, nil)
+			return respond(failure(action, cwdErr, nil))
 		}
 		res, execErr := execmod.Run(execmod.Options{
 			Argv:      req.Argv,
@@ -202,11 +210,11 @@ func handleJSON(manager *workspace.Manager, allowOutsideFlag bool, payload []byt
 			"timing_ms": res.TimingMS,
 		}
 		if execErr != nil {
-			return failure(action, execErr, fields)
+			return respond(failure(action, execErr, fields))
 		}
-		return protocol.Success(action, fields)
+		return respond(protocol.Success(action, fields))
 	default:
-		return protocol.Failure(action, protocol.CodeInvalidRequest, "unknown action", nil)
+		return respond(protocol.Failure(action, protocol.CodeInvalidRequest, "unknown action", nil))
 	}
 }
 

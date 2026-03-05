@@ -7,6 +7,7 @@ import (
 )
 
 type Request struct {
+	RequestID             string          `json:"request_id,omitempty"`
 	Action                string          `json:"action"`
 	Path                  string          `json:"path,omitempty"`
 	Query                 string          `json:"query,omitempty"`

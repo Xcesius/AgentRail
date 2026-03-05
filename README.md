@@ -6,6 +6,7 @@
 - JSON-only stdout protocol
 - Safe workspace-aware filesystem controls
 - Direct argv process execution (no shell)
+- Normative protocol spec: `PROTOCOL.md`
 
 ## Commands
 
