@@ -16,6 +16,7 @@ import (
 
 	filesmod "agentrail/internal/files"
 	"agentrail/internal/protocol"
+	"agentrail/internal/textutil"
 	"agentrail/internal/workspace"
 )
 
@@ -173,7 +174,7 @@ func scanFile(path, rel string, options Options, rx *regexp.Regexp) []Match {
 
 	reader := bufio.NewReaderSize(file, 64*1024)
 	peek, _ := reader.Peek(4096)
-	if isBinary(peek) {
+	if textutil.IsLikelyBinary(peek) {
 		return nil
 	}
 
@@ -254,24 +255,4 @@ func bounded(text string, max int) string {
 		return text
 	}
 	return text[:max]
-}
-
-func isBinary(sample []byte) bool {
-	if len(sample) == 0 {
-		return false
-	}
-	nonText := 0
-	for _, b := range sample {
-		if b == 0 {
-			return true
-		}
-		if b == '\n' || b == '\r' || b == '\t' {
-			continue
-		}
-		if b < 0x20 || b > 0x7e {
-			nonText++
-		}
-	}
-	ratio := float64(nonText) / float64(len(sample))
-	return ratio > 0.30
 }

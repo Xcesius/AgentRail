@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"agentrail/internal/protocol"
+	"agentrail/internal/textutil"
 )
 
 const defaultMaxBytes int64 = 1024 * 1024
@@ -58,7 +59,7 @@ func ReadFile(path string, options Options) (Result, error) {
 
 	reader := bufio.NewReaderSize(file, 64*1024)
 	peek, _ := reader.Peek(4096)
-	if isBinary(peek) {
+	if textutil.IsLikelyBinary(peek) {
 		return Result{}, protocol.Err(protocol.CodeBinaryFile, "binary file cannot be read")
 	}
 
@@ -105,23 +106,4 @@ func ReadFile(path string, options Options) (Result, error) {
 		EndLine:   lastLine,
 		Truncated: truncated,
 	}, nil
-}
-
-func isBinary(sample []byte) bool {
-	if len(sample) == 0 {
-		return false
-	}
-	nonText := 0
-	for _, b := range sample {
-		if b == 0 {
-			return true
-		}
-		if b == '\n' || b == '\r' || b == '\t' {
-			continue
-		}
-		if b < 0x20 || b > 0x7e {
-			nonText++
-		}
-	}
-	return float64(nonText)/float64(len(sample)) > 0.30
 }

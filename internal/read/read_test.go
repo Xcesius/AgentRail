@@ -52,6 +52,43 @@ func TestReadMaxBytesTruncatesLargeFile(t *testing.T) {
 	}
 }
 
+func TestReadExactMaxBytesIsNotTruncated(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "exact.txt")
+	content := "12345\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	result, err := ReadFile(path, Options{StartLine: 1, MaxBytes: int64(len(content))})
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if result.Truncated {
+		t.Fatalf("expected exact-size read to avoid truncation")
+	}
+	if result.Content != content {
+		t.Fatalf("unexpected content: %q", result.Content)
+	}
+}
+
+func TestReadAcceptsUTF8Text(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "utf8.txt")
+	content := "Grüße 世界\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	result, err := ReadFile(path, Options{})
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if result.Content != content {
+		t.Fatalf("unexpected content: %q", result.Content)
+	}
+}
+
 func TestReadRejectsBinaryFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "binary.bin")

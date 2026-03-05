@@ -91,7 +91,7 @@ func applySingle(manager *workspace.Manager, filePatch FilePatch) FileResult {
 	}
 
 	if opType == "delete" {
-		if strings.TrimSpace(updated) != "" {
+		if updated != "" {
 			return FileResult{Path: displayPath, OK: false, Error: "delete patch did not produce empty file"}
 		}
 		if removeErr := os.Remove(resolved); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
