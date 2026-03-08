@@ -5,7 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	patchmod "agentrail/internal/patch"
 	"agentrail/internal/protocol"
+	searchmod "agentrail/internal/search"
 	"agentrail/internal/workspace"
 )
 
@@ -59,6 +61,37 @@ func TestHandleJSONReadIncludesPagingFields(t *testing.T) {
 	}
 }
 
+func TestHandleJSONReadBinaryFileUsesCanonicalPath(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "nested", "binary.bin")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(path, []byte{'n', 0, 'x'}, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	manager, err := workspace.NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+
+	resp := handleJSON(manager, false, []byte(`{"action":"read","path":"nested/binary.bin"}`))
+	if ok, _ := resp["ok"].(bool); ok {
+		t.Fatalf("expected failure response, got %+v", resp)
+	}
+	errPayload, ok := resp["error"].(protocol.ErrorPayload)
+	if !ok {
+		t.Fatalf("expected error payload, got %+v", resp)
+	}
+	if errPayload.Code != protocol.CodeBinaryFile {
+		t.Fatalf("expected binary_file, got %+v", errPayload)
+	}
+	if errPayload.Details["path"] != "nested/binary.bin" {
+		t.Fatalf("expected canonical workspace-relative path, got %+v", errPayload)
+	}
+}
+
 func TestHandleJSONMalformedJSONUsesJSONAction(t *testing.T) {
 	manager, err := workspace.NewManagerFromRoot(t.TempDir())
 	if err != nil {
@@ -78,5 +111,91 @@ func TestHandleJSONMalformedJSONUsesJSONAction(t *testing.T) {
 	}
 	if errPayload.Code != protocol.CodeInvalidRequest {
 		t.Fatalf("expected invalid_request, got %+v", errPayload)
+	}
+}
+
+func TestHandleJSONExecRejectsInvalidMaxOutputBytes(t *testing.T) {
+	manager, err := workspace.NewManagerFromRoot(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+
+	resp := handleJSON(manager, false, []byte(`{"action":"exec","argv":["cmd"],"max_output_bytes":0}`))
+	if ok, _ := resp["ok"].(bool); ok {
+		t.Fatalf("expected failure response, got %+v", resp)
+	}
+	errPayload, ok := resp["error"].(protocol.ErrorPayload)
+	if !ok {
+		t.Fatalf("expected error payload, got %+v", resp)
+	}
+	if errPayload.Code != protocol.CodeInvalidRequest {
+		t.Fatalf("expected invalid_request, got %+v", errPayload)
+	}
+	if errPayload.Details["field"] != "max_output_bytes" {
+		t.Fatalf("expected max_output_bytes detail, got %+v", errPayload)
+	}
+}
+
+func TestHandleJSONPatchResponseIncludesRepositoryState(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "sample.txt")
+	if err := os.WriteFile(path, []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	manager, err := workspace.NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+
+	payload := []byte(`{"action":"patch","diff":"--- a/sample.txt\n+++ b/sample.txt\n@@ -1,1 +1,1 @@\n-hello\n+world\n"}`)
+	resp := handleJSON(manager, false, payload)
+	if ok, _ := resp["ok"].(bool); !ok {
+		t.Fatalf("expected success response, got %+v", resp)
+	}
+	if repositoryState, _ := resp["repository_state"].(string); repositoryState != patchmod.RepositoryStateChanged {
+		t.Fatalf("expected changed repository state, got %+v", resp)
+	}
+}
+
+func TestHandleJSONUsesConsistentCanonicalPathsAcrossActions(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "nested", "sample.txt")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("needle\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	manager, err := workspace.NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+
+	filesResp := handleJSON(manager, false, []byte(`{"action":"files"}`))
+	paths, ok := filesResp["paths"].([]string)
+	if !ok || len(paths) != 1 || paths[0] != "nested/sample.txt" {
+		t.Fatalf("unexpected files response: %+v", filesResp)
+	}
+
+	readResp := handleJSON(manager, false, []byte(`{"action":"read","path":"nested/sample.txt"}`))
+	if got, _ := readResp["path"].(string); got != "nested/sample.txt" {
+		t.Fatalf("unexpected read path: %+v", readResp)
+	}
+
+	searchResp := handleJSON(manager, false, []byte(`{"action":"search","query":"needle"}`))
+	matches, ok := searchResp["matches"].([]searchmod.Match)
+	if !ok || len(matches) != 1 || matches[0].Path != "nested/sample.txt" {
+		t.Fatalf("unexpected search response: %+v", searchResp)
+	}
+
+	patchResp := handleJSON(manager, false, []byte(`{"action":"patch","diff":"--- a/nested/sample.txt\n+++ b/nested/sample.txt\n@@ -1,1 +1,1 @@\n-needle\n+thread\n"}`))
+	if ok, _ := patchResp["ok"].(bool); !ok {
+		t.Fatalf("expected patch success, got %+v", patchResp)
+	}
+	results, ok := patchResp["results"].([]patchmod.FileResult)
+	if !ok || len(results) != 1 || results[0].Path != "nested/sample.txt" {
+		t.Fatalf("unexpected patch results: %+v", patchResp)
 	}
 }

@@ -159,6 +159,21 @@ func TestReadRejectsUTF16LEBOMAsBinary(t *testing.T) {
 	}
 }
 
+func TestReadNotFoundIncludesCanonicalPath(t *testing.T) {
+	dir := t.TempDir()
+	_, err := ReadFile(filepath.Join(dir, "missing.txt"), Options{DisplayPath: "missing.txt"})
+	if err == nil {
+		t.Fatalf("expected not_found error")
+	}
+	te, ok := protocol.AsToolError(err)
+	if !ok || te.Code != protocol.CodeNotFound {
+		t.Fatalf("expected not_found, got %v", err)
+	}
+	if te.Details["path"] != "missing.txt" || te.Details["kind"] != "file" {
+		t.Fatalf("expected canonical path details, got %+v", te.Details)
+	}
+}
+
 func TestReadStartLineBeyondEOFReturnsEmptyPage(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "short.txt")
@@ -179,5 +194,40 @@ func TestReadStartLineBeyondEOFReturnsEmptyPage(t *testing.T) {
 	}
 	if result.Truncated || result.HasMore || result.NextStartLine != 0 {
 		t.Fatalf("expected no continuation, got truncated=%v has_more=%v next_start_line=%d", result.Truncated, result.HasMore, result.NextStartLine)
+	}
+}
+
+func TestReadFileTokenStableAcrossPagesAndChangesAfterWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "token.txt")
+	content := "line1\nline2\nline3\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	page1, err := ReadFile(path, Options{StartLine: 1, MaxBytes: int64(len("line1\n"))})
+	if err != nil {
+		t.Fatalf("ReadFile page1: %v", err)
+	}
+	page2, err := ReadFile(path, Options{StartLine: page1.NextStartLine, MaxBytes: 1024})
+	if err != nil {
+		t.Fatalf("ReadFile page2: %v", err)
+	}
+	if page1.FileToken == "" || page2.FileToken == "" {
+		t.Fatalf("expected file tokens, got page1=%q page2=%q", page1.FileToken, page2.FileToken)
+	}
+	if page1.FileToken != page2.FileToken {
+		t.Fatalf("expected stable token across pages, got %q vs %q", page1.FileToken, page2.FileToken)
+	}
+
+	if err := os.WriteFile(path, []byte("line1\nchanged\nline3\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile updated: %v", err)
+	}
+	updated, err := ReadFile(path, Options{})
+	if err != nil {
+		t.Fatalf("ReadFile updated: %v", err)
+	}
+	if updated.FileToken == page1.FileToken {
+		t.Fatalf("expected token change after modification, got %q", updated.FileToken)
 	}
 }

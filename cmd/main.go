@@ -26,11 +26,20 @@ type globalOptions struct {
 	Args         []string
 }
 
+type filesCLIOptions struct {
+	Limit  int
+	Cursor string
+}
+
+type patchCLIOptions struct {
+	Atomic bool
+}
+
 func main() {
 	manager, err := workspace.NewManager()
 	if err != nil {
-		code, message := protocol.GetCodeAndMessage(err, protocol.CodeWorkspaceRequired)
-		writeAndExit(protocol.Failure("init", code, message, nil))
+		payload := protocol.GetErrorPayload(err, protocol.CodeWorkspaceRequired)
+		writeAndExit(protocol.FailureWithDetails("init", payload.Code, payload.Message, payload.Details, nil))
 		return
 	}
 	if warning := manager.WarningMessage(); warning != "" {
@@ -44,30 +53,27 @@ func main() {
 func run(manager *workspace.Manager, args []string) map[string]any {
 	globals, err := parseGlobalFlags(args)
 	if err != nil {
-		code, message := protocol.GetCodeAndMessage(err, protocol.CodeInvalidRequest)
-		return protocol.Failure("cli", code, message, nil)
+		return failure("cli", err, nil)
 	}
 
 	if globals.ForceJSON {
 		if len(globals.Args) != 0 {
-			return protocol.Failure("json", protocol.CodeInvalidRequest, "--json does not accept CLI subcommands", nil)
+			return protocol.FailureWithDetails("json", protocol.CodeInvalidRequest, "--json does not accept CLI subcommands", protocol.ErrorDetails{"field": "--json", "reason": "unexpected_cli_args"}, nil)
 		}
 		payload, readErr := readStdin(true)
 		if readErr != nil {
-			code, message := protocol.GetCodeAndMessage(readErr, protocol.CodeInvalidRequest)
-			return protocol.Failure("json", code, message, nil)
+			return failure("json", readErr, nil)
 		}
 		return handleJSON(manager, globals.AllowOutside, payload)
 	}
 
 	if len(globals.Args) == 0 {
 		if !stdinHasData() {
-			return protocol.Failure("cli", protocol.CodeInvalidRequest, "missing command", nil)
+			return protocol.FailureWithDetails("cli", protocol.CodeInvalidRequest, "missing command", protocol.ErrorDetails{"field": "action", "reason": "required"}, nil)
 		}
 		payload, readErr := readStdin(true)
 		if readErr != nil {
-			code, message := protocol.GetCodeAndMessage(readErr, protocol.CodeInvalidRequest)
-			return protocol.Failure("json", code, message, nil)
+			return failure("json", readErr, nil)
 		}
 		return handleJSON(manager, globals.AllowOutside, payload)
 	}
@@ -78,8 +84,7 @@ func run(manager *workspace.Manager, args []string) map[string]any {
 func handleJSON(manager *workspace.Manager, allowOutsideFlag bool, payload []byte) map[string]any {
 	req, err := protocol.ParseRequest(payload)
 	if err != nil {
-		code, message := protocol.GetCodeAndMessage(err, protocol.CodeInvalidRequest)
-		return protocol.Failure("json", code, message, nil)
+		return failure("json", err, nil)
 	}
 
 	requestID := strings.TrimSpace(req.RequestID)
@@ -103,11 +108,11 @@ func handleJSON(manager *workspace.Manager, allowOutsideFlag bool, payload []byt
 		if resolveErr != nil {
 			return respond(failure(action, resolveErr, nil))
 		}
-		paths, listErr := filesmod.ListFiles(root, manager)
+		page, listErr := filesmod.ListFilesPage(root, manager, req.Limit, req.Cursor)
 		if listErr != nil {
 			return respond(failure(action, listErr, nil))
 		}
-		return respond(protocol.Success(action, map[string]any{"paths": paths}))
+		return respond(protocol.Success(action, map[string]any{"paths": page.Paths, "has_more": page.HasMore, "next_cursor": page.NextCursor}))
 	case "search":
 		base := req.Path
 		if base == "" {
@@ -137,23 +142,25 @@ func handleJSON(manager *workspace.Manager, allowOutsideFlag bool, payload []byt
 		return respond(protocol.Success(action, map[string]any{"matches": matches}))
 	case "read":
 		if strings.TrimSpace(req.Path) == "" {
-			return respond(protocol.Failure(action, protocol.CodeInvalidRequest, "path is required", nil))
+			return respond(protocol.FailureWithDetails(action, protocol.CodeInvalidRequest, "path is required", protocol.ErrorDetails{"field": "path", "reason": "required"}, nil))
 		}
 		resolved, resolveErr := manager.ResolveReadPath(req.Path, allowOutside)
 		if resolveErr != nil {
 			return respond(failure(action, resolveErr, nil))
 		}
 		result, readErr := readmod.ReadFile(resolved, readmod.Options{
-			StartLine: req.StartLine,
-			EndLine:   req.EndLine,
-			MaxBytes:  req.MaxBytes,
+			DisplayPath: manager.DisplayPath(resolved),
+			StartLine:   req.StartLine,
+			EndLine:     req.EndLine,
+			MaxBytes:    req.MaxBytes,
 		})
 		if readErr != nil {
 			return respond(failure(action, readErr, nil))
 		}
 		fields := map[string]any{
-			"path":            manager.RelativePath(resolved),
+			"path":            manager.DisplayPath(resolved),
 			"content":         result.Content,
+			"file_token":      result.FileToken,
 			"start_line":      result.StartLine,
 			"end_line":        result.EndLine,
 			"truncated":       result.Truncated,
@@ -163,10 +170,10 @@ func handleJSON(manager *workspace.Manager, allowOutsideFlag bool, payload []byt
 		return respond(protocol.Success(action, fields))
 	case "write":
 		if strings.TrimSpace(req.Path) == "" {
-			return respond(protocol.Failure(action, protocol.CodeInvalidRequest, "path is required", nil))
+			return respond(protocol.FailureWithDetails(action, protocol.CodeInvalidRequest, "path is required", protocol.ErrorDetails{"field": "path", "reason": "required"}, nil))
 		}
 		if req.Content == nil {
-			return respond(protocol.Failure(action, protocol.CodeInvalidRequest, "content is required in JSON mode", nil))
+			return respond(protocol.FailureWithDetails(action, protocol.CodeInvalidRequest, "content is required in JSON mode", protocol.ErrorDetails{"field": "content", "reason": "required"}, nil))
 		}
 		resolved, resolveErr := manager.ResolveWritePath(req.Path)
 		if resolveErr != nil {
@@ -177,18 +184,19 @@ func handleJSON(manager *workspace.Manager, allowOutsideFlag bool, payload []byt
 			return respond(failure(action, writeErr, nil))
 		}
 		return respond(protocol.Success(action, map[string]any{
-			"path":          manager.RelativePath(resolved),
+			"path":          manager.DisplayPath(resolved),
 			"bytes_written": written,
 		}))
 	case "patch":
 		if req.Diff == nil {
-			return respond(protocol.Failure(action, protocol.CodeInvalidRequest, "diff is required in JSON mode", nil))
+			return respond(protocol.FailureWithDetails(action, protocol.CodeInvalidRequest, "diff is required in JSON mode", protocol.ErrorDetails{"field": "diff", "reason": "required"}, patchBaseFields()))
 		}
-		applyResult, patchErr := patchmod.Apply(manager, *req.Diff)
+		applyResult, patchErr := patchmod.Apply(manager, *req.Diff, patchmod.Options{Atomic: req.Atomic, ExpectedFileTokens: req.ExpectedFileTokens})
 		fields := map[string]any{
-			"files_changed": applyResult.FilesChanged,
-			"hunks_applied": applyResult.HunksApplied,
-			"results":       applyResult.Results,
+			"repository_state": applyResult.RepositoryState,
+			"files_changed":    applyResult.FilesChanged,
+			"hunks_applied":    applyResult.HunksApplied,
+			"results":          applyResult.Results,
 		}
 		if patchErr != nil {
 			return respond(failure(action, patchErr, fields))
@@ -199,24 +207,32 @@ func handleJSON(manager *workspace.Manager, allowOutsideFlag bool, payload []byt
 		if cwdErr != nil {
 			return respond(failure(action, cwdErr, nil))
 		}
+		maxOutputBytes, outputErr := resolveMaxOutputBytes(req.MaxOutputBytes)
+		if outputErr != nil {
+			return respond(failure(action, outputErr, nil))
+		}
 		res, execErr := execmod.Run(execmod.Options{
-			Argv:      req.Argv,
-			CWD:       cwd,
-			Env:       req.Env,
-			TimeoutMS: req.TimeoutMS,
+			Argv:           req.Argv,
+			CWD:            cwd,
+			Env:            req.Env,
+			TimeoutMS:      req.TimeoutMS,
+			MaxOutputBytes: maxOutputBytes,
 		})
 		fields := map[string]any{
-			"exit_code": res.ExitCode,
-			"stdout":    res.Stdout,
-			"stderr":    res.Stderr,
-			"timing_ms": res.TimingMS,
+			"exit_code":        res.ExitCode,
+			"stdout":           res.Stdout,
+			"stderr":           res.Stderr,
+			"stdout_truncated": res.StdoutTruncated,
+			"stderr_truncated": res.StderrTruncated,
+			"output_bytes":     res.OutputBytes,
+			"timing_ms":        res.TimingMS,
 		}
 		if execErr != nil {
 			return respond(failure(action, execErr, fields))
 		}
 		return respond(protocol.Success(action, fields))
 	default:
-		return respond(protocol.Failure(action, protocol.CodeInvalidRequest, "unknown action", nil))
+		return respond(protocol.FailureWithDetails(action, protocol.CodeInvalidRequest, "unknown action", protocol.ErrorDetails{"field": "action", "reason": "unknown_action"}, nil))
 	}
 }
 
@@ -226,17 +242,18 @@ func handleCLI(manager *workspace.Manager, globals globalOptions) map[string]any
 
 	switch cmd {
 	case "files":
-		if len(args) != 0 {
-			return protocol.Failure(cmd, protocol.CodeInvalidRequest, "files does not accept positional arguments", nil)
+		options, parseErr := parseFilesCLIArgs(args)
+		if parseErr != nil {
+			return failure(cmd, parseErr, nil)
 		}
-		paths, err := filesmod.ListFiles(manager.Root, manager)
+		page, err := filesmod.ListFilesPage(manager.Root, manager, options.Limit, options.Cursor)
 		if err != nil {
 			return failure(cmd, err, nil)
 		}
-		return protocol.Success(cmd, map[string]any{"paths": paths})
+		return protocol.Success(cmd, map[string]any{"paths": page.Paths, "has_more": page.HasMore, "next_cursor": page.NextCursor})
 	case "search":
 		if len(args) < 1 {
-			return protocol.Failure(cmd, protocol.CodeInvalidRequest, "search requires <query>", nil)
+			return protocol.FailureWithDetails(cmd, protocol.CodeInvalidRequest, "search requires <query>", protocol.ErrorDetails{"field": "query", "reason": "required"}, nil)
 		}
 		matches, err := searchmod.Search(context.Background(), manager, searchmod.Options{
 			Query:         args[0],
@@ -251,19 +268,20 @@ func handleCLI(manager *workspace.Manager, globals globalOptions) map[string]any
 		return protocol.Success(cmd, map[string]any{"matches": matches})
 	case "read":
 		if len(args) != 1 {
-			return protocol.Failure(cmd, protocol.CodeInvalidRequest, "read requires <path>", nil)
+			return protocol.FailureWithDetails(cmd, protocol.CodeInvalidRequest, "read requires <path>", protocol.ErrorDetails{"field": "path", "reason": "required"}, nil)
 		}
 		resolved, err := manager.ResolveReadPath(args[0], globals.AllowOutside)
 		if err != nil {
 			return failure(cmd, err, nil)
 		}
-		result, readErr := readmod.ReadFile(resolved, readmod.Options{})
+		result, readErr := readmod.ReadFile(resolved, readmod.Options{DisplayPath: manager.DisplayPath(resolved)})
 		if readErr != nil {
 			return failure(cmd, readErr, nil)
 		}
 		return protocol.Success(cmd, map[string]any{
-			"path":            manager.RelativePath(resolved),
+			"path":            manager.DisplayPath(resolved),
 			"content":         result.Content,
+			"file_token":      result.FileToken,
 			"start_line":      result.StartLine,
 			"end_line":        result.EndLine,
 			"truncated":       result.Truncated,
@@ -272,7 +290,7 @@ func handleCLI(manager *workspace.Manager, globals globalOptions) map[string]any
 		})
 	case "write":
 		if len(args) != 1 {
-			return protocol.Failure(cmd, protocol.CodeInvalidRequest, "write requires <path>", nil)
+			return protocol.FailureWithDetails(cmd, protocol.CodeInvalidRequest, "write requires <path>", protocol.ErrorDetails{"field": "path", "reason": "required"}, nil)
 		}
 		content, readErr := readStdin(true)
 		if readErr != nil {
@@ -287,22 +305,24 @@ func handleCLI(manager *workspace.Manager, globals globalOptions) map[string]any
 			return failure(cmd, writeErr, nil)
 		}
 		return protocol.Success(cmd, map[string]any{
-			"path":          manager.RelativePath(resolved),
+			"path":          manager.DisplayPath(resolved),
 			"bytes_written": written,
 		})
 	case "patch":
-		if len(args) != 0 {
-			return protocol.Failure(cmd, protocol.CodeInvalidRequest, "patch does not accept positional arguments", nil)
+		patchOpts, parseErr := parsePatchCLIArgs(args)
+		if parseErr != nil {
+			return failure(cmd, parseErr, patchBaseFields())
 		}
 		diff, readErr := readStdin(true)
 		if readErr != nil {
-			return failure(cmd, readErr, nil)
+			return failure(cmd, readErr, patchBaseFields())
 		}
-		applyResult, patchErr := patchmod.Apply(manager, string(diff))
+		applyResult, patchErr := patchmod.Apply(manager, string(diff), patchmod.Options{Atomic: patchOpts.Atomic})
 		fields := map[string]any{
-			"files_changed": applyResult.FilesChanged,
-			"hunks_applied": applyResult.HunksApplied,
-			"results":       applyResult.Results,
+			"repository_state": applyResult.RepositoryState,
+			"files_changed":    applyResult.FilesChanged,
+			"hunks_applied":    applyResult.HunksApplied,
+			"results":          applyResult.Results,
 		}
 		if patchErr != nil {
 			return failure(cmd, patchErr, fields)
@@ -320,17 +340,20 @@ func handleCLI(manager *workspace.Manager, globals globalOptions) map[string]any
 		execOpts.CWD = cwd
 		result, runErr := execmod.Run(execOpts)
 		fields := map[string]any{
-			"exit_code": result.ExitCode,
-			"stdout":    result.Stdout,
-			"stderr":    result.Stderr,
-			"timing_ms": result.TimingMS,
+			"exit_code":        result.ExitCode,
+			"stdout":           result.Stdout,
+			"stderr":           result.Stderr,
+			"stdout_truncated": result.StdoutTruncated,
+			"stderr_truncated": result.StderrTruncated,
+			"output_bytes":     result.OutputBytes,
+			"timing_ms":        result.TimingMS,
 		}
 		if runErr != nil {
 			return failure(cmd, runErr, fields)
 		}
 		return protocol.Success(cmd, fields)
 	default:
-		return protocol.Failure("cli", protocol.CodeInvalidRequest, "unknown command", nil)
+		return protocol.FailureWithDetails("cli", protocol.CodeInvalidRequest, "unknown command", protocol.ErrorDetails{"field": "action", "reason": "unknown_command"}, nil)
 	}
 }
 
@@ -358,6 +381,45 @@ func parseGlobalFlags(args []string) (globalOptions, error) {
 	return out, nil
 }
 
+func parseFilesCLIArgs(args []string) (filesCLIOptions, error) {
+	var options filesCLIOptions
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--limit":
+			i++
+			if i >= len(args) {
+				return filesCLIOptions{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "--limit requires a value", protocol.ErrorDetails{"field": "limit", "reason": "required"})
+			}
+			value, err := strconv.Atoi(args[i])
+			if err != nil {
+				return filesCLIOptions{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "invalid limit value", protocol.ErrorDetails{"field": "limit", "reason": "invalid_type"})
+			}
+			options.Limit = value
+		case "--cursor":
+			i++
+			if i >= len(args) {
+				return filesCLIOptions{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "--cursor requires a value", protocol.ErrorDetails{"field": "cursor", "reason": "required"})
+			}
+			options.Cursor = args[i]
+		default:
+			return filesCLIOptions{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "files does not accept positional arguments", protocol.ErrorDetails{"field": "files", "reason": "unexpected_argument"})
+		}
+	}
+	return options, nil
+}
+
+func parsePatchCLIArgs(args []string) (patchCLIOptions, error) {
+	var options patchCLIOptions
+	for _, arg := range args {
+		if arg == "--atomic" {
+			options.Atomic = true
+			continue
+		}
+		return patchCLIOptions{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "patch does not accept positional arguments", protocol.ErrorDetails{"field": "patch", "reason": "unexpected_argument"})
+	}
+	return options, nil
+}
+
 func parseExecCLIArgs(args []string) (execmod.Options, error) {
 	var options execmod.Options
 	i := 0
@@ -371,43 +433,75 @@ func parseExecCLIArgs(args []string) (execmod.Options, error) {
 		case "--cwd":
 			i++
 			if i >= len(args) {
-				return execmod.Options{}, protocol.Err(protocol.CodeInvalidRequest, "--cwd requires a value")
+				return execmod.Options{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "--cwd requires a value", protocol.ErrorDetails{"field": "cwd", "reason": "required"})
 			}
 			options.CWD = args[i]
 		case "--timeout-ms":
 			i++
 			if i >= len(args) {
-				return execmod.Options{}, protocol.Err(protocol.CodeInvalidRequest, "--timeout-ms requires a value")
+				return execmod.Options{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "--timeout-ms requires a value", protocol.ErrorDetails{"field": "timeout_ms", "reason": "required"})
 			}
 			value, err := strconv.Atoi(args[i])
 			if err != nil || value < 0 {
-				return execmod.Options{}, protocol.Err(protocol.CodeInvalidRequest, "invalid timeout value")
+				return execmod.Options{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "invalid timeout value", protocol.ErrorDetails{"field": "timeout_ms", "reason": "invalid_value"})
 			}
 			options.TimeoutMS = value
+		case "--max-output-bytes":
+			i++
+			if i >= len(args) {
+				return execmod.Options{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "--max-output-bytes requires a value", protocol.ErrorDetails{"field": "max_output_bytes", "reason": "required"})
+			}
+			value, err := strconv.ParseInt(args[i], 10, 64)
+			if err != nil {
+				return execmod.Options{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "invalid max_output_bytes", protocol.ErrorDetails{"field": "max_output_bytes", "reason": "invalid_type"})
+			}
+			if value <= 0 || value > execmod.HardMaxOutputBytes {
+				return execmod.Options{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "invalid max_output_bytes", protocol.ErrorDetails{"field": "max_output_bytes", "reason": "invalid_value"})
+			}
+			options.MaxOutputBytes = value
 		default:
-			return execmod.Options{}, protocol.Err(protocol.CodeInvalidRequest, "exec arguments must follow --")
+			return execmod.Options{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "exec arguments must follow --", protocol.ErrorDetails{"field": "argv", "reason": "missing_separator"})
 		}
 		i++
 	}
 	if i >= len(args) {
-		return execmod.Options{}, protocol.Err(protocol.CodeInvalidRequest, "exec requires -- <argv...>")
+		return execmod.Options{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "exec requires -- <argv...>", protocol.ErrorDetails{"field": "argv", "reason": "required"})
 	}
 	options.Argv = args[i:]
 	if len(options.Argv) == 0 {
-		return execmod.Options{}, protocol.Err(protocol.CodeInvalidRequest, "exec argv must not be empty")
+		return execmod.Options{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "exec argv must not be empty", protocol.ErrorDetails{"field": "argv", "reason": "required"})
 	}
 	return options, nil
 }
 
+func resolveMaxOutputBytes(raw *int64) (int64, error) {
+	if raw == nil {
+		return 0, nil
+	}
+	if *raw <= 0 || *raw > execmod.HardMaxOutputBytes {
+		return 0, protocol.ErrDetails(protocol.CodeInvalidRequest, "invalid max_output_bytes", protocol.ErrorDetails{"field": "max_output_bytes", "reason": "invalid_value"})
+	}
+	return *raw, nil
+}
+
 func failure(action string, err error, fields map[string]any) map[string]any {
-	code, message := protocol.GetCodeAndMessage(err, protocol.CodeInvalidRequest)
-	return protocol.Failure(action, code, message, fields)
+	payload := protocol.GetErrorPayload(err, protocol.CodeInvalidRequest)
+	return protocol.FailureWithDetails(action, payload.Code, payload.Message, payload.Details, fields)
+}
+
+func patchBaseFields() map[string]any {
+	return map[string]any{
+		"repository_state": patchmod.RepositoryStateUnchanged,
+		"files_changed":    []string{},
+		"hunks_applied":    0,
+		"results":          []patchmod.FileResult{},
+	}
 }
 
 func readStdin(required bool) ([]byte, error) {
 	if !stdinHasData() {
 		if required {
-			return nil, protocol.Err(protocol.CodeInvalidRequest, "stdin is required")
+			return nil, protocol.ErrDetails(protocol.CodeInvalidRequest, "stdin is required", protocol.ErrorDetails{"field": "stdin", "reason": "required"})
 		}
 		return nil, nil
 	}
@@ -417,7 +511,7 @@ func readStdin(required bool) ([]byte, error) {
 		return nil, protocol.Err(protocol.CodeInvalidRequest, "unable to read stdin")
 	}
 	if len(data) >= maxStdinBytes {
-		return nil, protocol.Err(protocol.CodeTooLarge, "stdin payload exceeds limit")
+		return nil, protocol.ErrDetails(protocol.CodeTooLarge, "stdin payload exceeds limit", protocol.ErrorDetails{"field": "stdin", "limit_bytes": maxStdinBytes, "actual_bytes": len(data)})
 	}
 	return data, nil
 }

@@ -1,12 +1,15 @@
 # agentrail
 
-`agentrail` is a high-performance command-line execution adapter for AI coding agents.
+`agentrail` is a Windows-focused execution adapter for AI coding agents.
 
-- Single self-contained Go binary for Windows
-- JSON-only stdout protocol
-- Safe workspace-aware filesystem controls
-- Direct argv process execution (no shell)
-- Normative protocol spec: `PROTOCOL.md`
+It provides:
+
+- one self-contained Go binary
+- JSON-only stdout
+- workspace-aware filesystem controls
+- deterministic file and search operations
+- direct-argv process execution with no shell parsing
+- a normative protocol spec in `PROTOCOL.md`
 
 ## Commands
 
@@ -19,162 +22,127 @@
 
 Global flags:
 
-- `--json` force JSON request mode (stdin request object)
-- `--allow-outside-workspace` opt-in outside-workspace access for read/search/files
+- `--json` force JSON request mode
+- `--allow-outside-workspace` opt-in outside-workspace access for `read`, `search`, and `files`
 
-## Workspace and Safety
+## Safety Model
 
-Workspace root is resolved at startup by:
+Workspace root is resolved from:
 
-1. `CODEX_TOOL_WORKSPACE` (if set)
-2. current working directory
-
-All path checks are absolute, cleaned, and symlink-resolved where possible.
+1. `CODEX_TOOL_WORKSPACE` if set
+2. otherwise the current working directory
 
 Safety rules:
 
-- Deny traversal into `.git` and `node_modules`
-- Deny Windows system directories (`C:\Windows`, `C:\Program Files`, `C:\Program Files (x86)`, `C:\ProgramData`) unless equal to workspace root
-- `write` and `patch` must stay inside workspace
-- `read/search/files` are workspace-only by default, with explicit opt-in for outside access
+- deny `.git` and `node_modules`
+- deny Windows system directories unless they are the workspace root
+- keep `write`, `patch`, and `exec.cwd` inside workspace
+- default `read`, `search`, and `files` to workspace-only access
 
-## JSON Protocol
+## Protocol
 
-All stdout responses are a single JSON object. Human diagnostics go to stderr.
+Every response is a single JSON object and includes:
 
-### Request example
+- `ok`
+- `action`
+- `protocol_version`
+- `tool_version`
+- `capabilities`
 
-```json
-{
-  "action": "read",
-  "path": "src/index.js"
-}
-```
+Read the full normative contract in `PROTOCOL.md`.
 
-### Success response example
+### Read example
 
 ```json
 {
   "ok": true,
   "action": "read",
-  "path": "src/index.js",
+  "protocol_version": 1,
+  "tool_version": "0.0.0-dev+0000000",
+  "capabilities": ["exec","exec_output_budget","exec_process_tree_kill","files","files_pagination","patch","patch_atomic","patch_expected_file_tokens","read","read_file_token","search","write"],
+  "path": "src/main.go",
+  "file_token": "sha256:...",
   "content": "...",
   "start_line": 1,
-  "end_line": 12,
-  "truncated": false,
-  "has_more": false,
-  "next_start_line": 0
+  "end_line": 80,
+  "truncated": true,
+  "has_more": true,
+  "next_start_line": 81
 }
 ```
 
-### Error response example
+### Patch example
 
 ```json
 {
-  "ok": false,
-  "action": "write",
-  "error": {
-    "code": "path_denied",
-    "message": "write outside workspace is not allowed"
-  }
+  "ok": true,
+  "action": "patch",
+  "repository_state": "changed",
+  "files_changed": ["src/main.go"],
+  "hunks_applied": 1,
+  "results": [
+    {"path":"src/main.go","ok":true,"changed":true,"hunks_applied":1}
+  ]
 }
 ```
 
-### Stable error codes
+### Exec example
 
-- `invalid_request`
-- `path_denied`
-- `not_found`
-- `binary_file`
-- `too_large`
-- `search_error`
-- `patch_failed`
-- `exec_failed`
-- `timeout`
-- `workspace_required`
+```json
+{
+  "ok": true,
+  "action": "exec",
+  "exit_code": 0,
+  "stdout": "...",
+  "stderr": "",
+  "stdout_truncated": false,
+  "stderr_truncated": false,
+  "output_bytes": 1842,
+  "timing_ms": 31
+}
+```
 
 ## CLI Examples
 
-### files
+List files:
 
 ```bash
 agentrail files
 ```
 
-### search
+Paginated file enumeration:
+
+```bash
+printf '{"action":"files","limit":200}' | agentrail --json
+```
+
+Search:
 
 ```bash
 agentrail search "TODO"
 ```
 
-### read
+Read:
 
 ```bash
-agentrail read "README.md"
+printf '{"action":"read","path":"README.md","start_line":1,"max_bytes":4096}' | agentrail --json
 ```
 
-`read` pages on full-line boundaries and returns `has_more` plus `next_start_line` for deterministic continuation.
-
-### write
+Patch atomically with file tokens:
 
 ```bash
-echo "hello" | agentrail write "notes.txt"
+printf '{"action":"patch","atomic":true,"expected_file_tokens":{"src/main.go":"sha256:..."},"diff":"..."}' | agentrail --json
 ```
 
-### patch
+Exec:
 
 ```bash
-cat change.diff | agentrail patch
+agentrail exec -- go test ./...
 ```
 
-### exec
+## Build
 
-```bash
-agentrail exec -- git status
-```
-
-## JSON Examples
-
-### search request
-
-```json
-{
-  "action": "search",
-  "query": "func main",
-  "regex": false,
-  "case_sensitive": false,
-  "limit": 50,
-  "max_file_bytes": 1048576,
-  "deterministic": true
-}
-```
-
-### write request
-
-```json
-{
-  "action": "write",
-  "path": "out.txt",
-  "create_dirs": true,
-  "content": "new file contents"
-}
-```
-
-### exec request
-
-```json
-{
-  "action": "exec",
-  "argv": ["git", "status"],
-  "cwd": ".",
-  "timeout_ms": 5000,
-  "env": {
-    "CI": "1"
-  }
-}
-```
-
-## Build (Windows single binary)
+Windows single-binary build:
 
 ```powershell
 set CGO_ENABLED=0
@@ -185,8 +153,8 @@ go build -trimpath -ldflags "-s -w -buildid=" -o bin/agentrail.exe ./cmd
 
 Notes:
 
-- `CGO_ENABLED=0` produces a self-contained `.exe` with no external runtime executable dependencies.
-- Windows static-linking semantics differ from Linux; this still yields a single deployable binary.
+- `CGO_ENABLED=0` yields a self-contained `.exe` with no external runtime executable dependencies.
+- The Windows build guarantees `exec_process_tree_kill` via Job Object semantics and advertises that capability accordingly.
 
 ## Testing
 
@@ -194,12 +162,11 @@ Notes:
 go test ./...
 ```
 
-Included unit tests cover:
+Coverage includes:
 
-- path traversal attempts
-- denied directory writes
-- partial reads
-- huge file safeguards
-- binary file detection
-- patch context mismatch
-- exec argv-only behavior and timeout handling
+- request parsing and envelope fields
+- path traversal and deny rules
+- file pagination and cursor errors
+- paged reads and file tokens
+- patch token checks, no-op behavior, and atomic validation
+- exec argv-only execution, timeout handling, and output-budget truncation

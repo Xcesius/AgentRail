@@ -71,13 +71,13 @@ func (m *Manager) ResolveReadPath(input string, allowOutside bool) (string, erro
 		return "", err
 	}
 	if !allowOutside && !m.IsWithinWorkspace(resolved) {
-		return "", protocol.Err(protocol.CodePathDenied, "read outside workspace is not allowed")
+		return "", protocol.ErrDetails(protocol.CodePathDenied, "read outside workspace is not allowed", protocol.ErrorDetails{"path": m.DisplayPath(resolved), "policy": "workspace_only"})
 	}
 	if m.isSystemDenied(resolved) {
-		return "", protocol.Err(protocol.CodePathDenied, "path is denied")
+		return "", protocol.ErrDetails(protocol.CodePathDenied, "path is denied", protocol.ErrorDetails{"path": m.DisplayPath(resolved), "policy": "system_directory"})
 	}
 	if m.IsDeniedPath(resolved) {
-		return "", protocol.Err(protocol.CodePathDenied, "path is denied")
+		return "", protocol.ErrDetails(protocol.CodePathDenied, "path is denied", protocol.ErrorDetails{"path": m.DisplayPath(resolved), "policy": "deny_rule"})
 	}
 	return resolved, nil
 }
@@ -88,13 +88,13 @@ func (m *Manager) ResolveWritePath(input string) (string, error) {
 		return "", err
 	}
 	if !m.IsWithinWorkspace(resolved) {
-		return "", protocol.Err(protocol.CodePathDenied, "write outside workspace is not allowed")
+		return "", protocol.ErrDetails(protocol.CodePathDenied, "write outside workspace is not allowed", protocol.ErrorDetails{"path": m.DisplayPath(resolved), "policy": "workspace_only"})
 	}
 	if m.IsDeniedPath(resolved) {
-		return "", protocol.Err(protocol.CodePathDenied, "path is denied")
+		return "", protocol.ErrDetails(protocol.CodePathDenied, "path is denied", protocol.ErrorDetails{"path": m.DisplayPath(resolved), "policy": "deny_rule"})
 	}
 	if m.isSystemDenied(resolved) {
-		return "", protocol.Err(protocol.CodePathDenied, "path is denied")
+		return "", protocol.ErrDetails(protocol.CodePathDenied, "path is denied", protocol.ErrorDetails{"path": m.DisplayPath(resolved), "policy": "system_directory"})
 	}
 	return resolved, nil
 }
@@ -107,12 +107,12 @@ func (m *Manager) ResolveDirPath(input string, allowOutside bool) (string, error
 	info, err := os.Stat(resolved)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return "", protocol.Err(protocol.CodeNotFound, "path not found")
+			return "", protocol.ErrDetails(protocol.CodeNotFound, "path not found", protocol.ErrorDetails{"path": m.DisplayPath(resolved), "kind": "directory"})
 		}
 		return "", protocol.Err(protocol.CodeInvalidRequest, "unable to inspect directory")
 	}
 	if !info.IsDir() {
-		return "", protocol.Err(protocol.CodeInvalidRequest, "path is not a directory")
+		return "", protocol.ErrDetails(protocol.CodeInvalidRequest, "path is not a directory", protocol.ErrorDetails{"field": "path", "reason": "not_directory"})
 	}
 	return resolved, nil
 }
@@ -126,20 +126,20 @@ func (m *Manager) ResolveExecCWD(input string) (string, error) {
 		return "", err
 	}
 	if !m.IsWithinWorkspace(resolved) {
-		return "", protocol.Err(protocol.CodePathDenied, "exec cwd outside workspace is not allowed")
+		return "", protocol.ErrDetails(protocol.CodePathDenied, "exec cwd outside workspace is not allowed", protocol.ErrorDetails{"path": m.DisplayPath(resolved), "policy": "workspace_only"})
 	}
 	if m.IsDeniedPath(resolved) || m.isSystemDenied(resolved) {
-		return "", protocol.Err(protocol.CodePathDenied, "path is denied")
+		return "", protocol.ErrDetails(protocol.CodePathDenied, "path is denied", protocol.ErrorDetails{"path": m.DisplayPath(resolved), "policy": "deny_rule"})
 	}
 	info, err := os.Stat(resolved)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return "", protocol.Err(protocol.CodeNotFound, "cwd not found")
+			return "", protocol.ErrDetails(protocol.CodeNotFound, "cwd not found", protocol.ErrorDetails{"path": m.DisplayPath(resolved), "kind": "directory"})
 		}
 		return "", protocol.Err(protocol.CodeInvalidRequest, "unable to inspect cwd")
 	}
 	if !info.IsDir() {
-		return "", protocol.Err(protocol.CodeInvalidRequest, "cwd must be a directory")
+		return "", protocol.ErrDetails(protocol.CodeInvalidRequest, "cwd must be a directory", protocol.ErrorDetails{"field": "cwd", "reason": "not_directory"})
 	}
 	return resolved, nil
 }
@@ -166,7 +166,7 @@ func (m *Manager) IsWithinWorkspace(path string) bool {
 	return true
 }
 
-func (m *Manager) RelativePath(path string) string {
+func (m *Manager) DisplayPath(path string) string {
 	path = filepath.Clean(path)
 	if m.IsWithinWorkspace(path) {
 		rel, err := filepath.Rel(m.Root, path)
@@ -177,7 +177,11 @@ func (m *Manager) RelativePath(path string) string {
 			return filepath.ToSlash(rel)
 		}
 	}
-	return filepath.ToSlash(path)
+	return canonicalAbsoluteDisplay(path)
+}
+
+func (m *Manager) RelativePath(path string) string {
+	return m.DisplayPath(path)
 }
 
 func (m *Manager) ShouldSkipDir(path string) bool {
@@ -207,7 +211,7 @@ func (m *Manager) resolvePath(input string) (string, error) {
 		candidate = "."
 	}
 	if vol := filepath.VolumeName(candidate); vol != "" && !filepath.IsAbs(candidate) {
-		return "", protocol.Err(protocol.CodePathDenied, "volume-relative paths are not allowed")
+		return "", protocol.ErrDetails(protocol.CodePathDenied, "volume-relative paths are not allowed", protocol.ErrorDetails{"path": filepath.ToSlash(candidate), "policy": "volume_relative"})
 	}
 
 	if !filepath.IsAbs(candidate) {
@@ -330,6 +334,14 @@ func equalPath(a, b string) bool {
 		return strings.EqualFold(a, b)
 	}
 	return a == b
+}
+
+func canonicalAbsoluteDisplay(path string) string {
+	clean := filepath.ToSlash(filepath.Clean(path))
+	if runtime.GOOS == "windows" && len(clean) >= 2 && clean[1] == ':' {
+		clean = strings.ToUpper(clean[:1]) + clean[1:]
+	}
+	return clean
 }
 
 func (m *Manager) WarningMessage() string {

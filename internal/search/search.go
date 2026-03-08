@@ -96,7 +96,7 @@ func Search(ctx context.Context, manager *workspace.Manager, options Options) ([
 					if options.Limit > 0 && int(count.Load()) >= options.Limit {
 						continue
 					}
-					rel := manager.RelativePath(path)
+					rel := manager.DisplayPath(path)
 					if options.Glob != "" {
 						matched, globErr := filepath.Match(options.Glob, rel)
 						if globErr != nil {
