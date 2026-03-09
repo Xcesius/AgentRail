@@ -99,6 +99,8 @@ func handleJSON(manager *workspace.Manager, allowOutsideFlag bool, payload []byt
 	allowOutside := allowOutsideFlag || req.AllowOutsideWorkspace
 
 	switch action {
+	case "schema":
+		return respond(schemaResponse(req.Target))
 	case "files":
 		base := req.Path
 		if base == "" {
@@ -241,6 +243,11 @@ func handleCLI(manager *workspace.Manager, globals globalOptions) map[string]any
 	args := globals.Args[1:]
 
 	switch cmd {
+	case "schema":
+		if len(args) != 1 {
+			return protocol.FailureWithDetails(cmd, protocol.CodeInvalidRequest, "schema requires <target>", protocol.ErrorDetails{"field": "target", "reason": "required"}, nil)
+		}
+		return schemaResponse(args[0])
 	case "files":
 		options, parseErr := parseFilesCLIArgs(args)
 		if parseErr != nil {
@@ -495,6 +502,95 @@ func patchBaseFields() map[string]any {
 		"files_changed":    []string{},
 		"hunks_applied":    0,
 		"results":          []patchmod.FileResult{},
+	}
+}
+
+func schemaResponse(target string) map[string]any {
+	normalized := strings.ToLower(strings.TrimSpace(target))
+	if normalized == "" {
+		return protocol.FailureWithDetails("schema", protocol.CodeInvalidRequest, "target is required", protocol.ErrorDetails{"field": "target", "reason": "required"}, nil)
+	}
+
+	switch normalized {
+	case "patch":
+		return protocol.Success("schema", patchSchemaFields())
+	default:
+		return protocol.FailureWithDetails("schema", protocol.CodeInvalidRequest, "unknown schema target", protocol.ErrorDetails{"field": "target", "reason": "unknown_target"}, nil)
+	}
+}
+
+func patchSchemaFields() map[string]any {
+	return map[string]any{
+		"target": "patch",
+		"request_schema": map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"required":             []string{"action", "diff"},
+			"properties": map[string]any{
+				"action": map[string]any{
+					"type":  "string",
+					"const": "patch",
+				},
+				"diff": map[string]any{
+					"type":        "string",
+					"format":      "unified_diff",
+					"description": "Full unified diff including ---/+++ file headers before @@ hunks.",
+				},
+				"atomic": map[string]any{
+					"type":    "boolean",
+					"default": false,
+				},
+				"expected_file_tokens": map[string]any{
+					"type": "object",
+					"additionalProperties": map[string]any{
+						"type":    "string",
+						"pattern": "^sha256:[0-9a-f]{64}$",
+					},
+					"description": "Map of canonical workspace-relative paths to current file tokens.",
+				},
+			},
+		},
+		"examples": []map[string]any{
+			{
+				"description": "Single-file update",
+				"request": map[string]any{
+					"action": "patch",
+					"diff": `--- a/sample.txt
++++ b/sample.txt
+@@ -1,1 +1,1 @@
+-old
++new
+`,
+				},
+			},
+			{
+				"description": "Atomic multi-file update with file tokens",
+				"request": map[string]any{
+					"action": "patch",
+					"atomic": true,
+					"expected_file_tokens": map[string]any{
+						"one.txt": "sha256:<64 lowercase hex>",
+						"two.txt": "sha256:<64 lowercase hex>",
+					},
+					"diff": `--- a/one.txt
++++ b/one.txt
+@@ -1,1 +1,1 @@
+-old
++new
+--- a/two.txt
++++ b/two.txt
+@@ -1,1 +1,1 @@
+-old
++new
+`,
+				},
+			},
+		},
+		"notes": []string{
+			"AgentRail JSON patch endpoint accepts unified diff text in diff only.",
+			"The diff must include ---/+++ file headers before any @@ hunks.",
+			"Fields such as mode, patch, old_string, and new_string are not part of the AgentRail CLI JSON contract.",
+		},
 	}
 }
 

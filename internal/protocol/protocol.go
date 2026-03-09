@@ -24,6 +24,7 @@ var baseCapabilities = []string{
 	"patch_expected_file_tokens",
 	"read",
 	"read_file_token",
+	"schema",
 	"search",
 	"write",
 }
@@ -31,6 +32,7 @@ var baseCapabilities = []string{
 type Request struct {
 	RequestID             string            `json:"request_id,omitempty"`
 	Action                string            `json:"action"`
+	Target                string            `json:"target,omitempty"`
 	Path                  string            `json:"path,omitempty"`
 	Query                 string            `json:"query,omitempty"`
 	Content               *string           `json:"content,omitempty"`
@@ -179,6 +181,8 @@ func requestFieldName(field string) string {
 		return "request_id"
 	case "Action", "action":
 		return "action"
+	case "Target", "target":
+		return "target"
 	case "Path", "path":
 		return "path"
 	case "Query", "query":

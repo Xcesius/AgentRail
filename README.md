@@ -15,6 +15,7 @@ It provides:
 
 - `agentrail search <query>`
 - `agentrail files`
+- `agentrail schema <target>`
 - `agentrail read <path>`
 - `agentrail write <path>`
 - `agentrail patch`
@@ -51,6 +52,8 @@ Every response is a single JSON object and includes:
 
 Read the full normative contract in `PROTOCOL.md`.
 
+Use `agentrail schema patch` or `{"action":"schema","target":"patch"}` in JSON mode to inspect the live patch request contract.
+
 ### Read example
 
 ```json
@@ -59,7 +62,7 @@ Read the full normative contract in `PROTOCOL.md`.
   "action": "read",
   "protocol_version": 1,
   "tool_version": "0.0.0-dev+0000000",
-  "capabilities": ["exec","exec_output_budget","exec_process_tree_kill","files","files_pagination","patch","patch_atomic","patch_expected_file_tokens","read","read_file_token","search","write"],
+  "capabilities": ["exec","exec_output_budget","exec_process_tree_kill","files","files_pagination","patch","patch_atomic","patch_expected_file_tokens","read","read_file_token","schema","search","write"],
   "path": "src/main.go",
   "file_token": "sha256:...",
   "content": "...",
@@ -131,8 +134,20 @@ printf '{"action":"read","path":"README.md","start_line":1,"max_bytes":4096}' | 
 Patch atomically with file tokens:
 
 ```bash
-printf '{"action":"patch","atomic":true,"expected_file_tokens":{"src/main.go":"sha256:..."},"diff":"..."}' | agentrail --json
+printf '{"action":"patch","atomic":true,"expected_file_tokens":{"src/main.go":"sha256:..."},"diff":"--- a/src/main.go\n+++ b/src/main.go\n@@ -1,1 +1,1 @@\n-old\n+new\n"}' | agentrail --json
 ```
+
+Patch contract schema:
+
+```bash
+printf '{"action":"schema","target":"patch"}' | agentrail --json
+```
+
+Notes:
+
+- The JSON patch endpoint accepts unified diff text in `diff` only.
+- The diff must include `---` and `+++` file headers before any `@@` hunks.
+- Fields like `mode`, `patch`, `old_string`, and `new_string` are not part of the CLI JSON contract.
 
 Exec:
 

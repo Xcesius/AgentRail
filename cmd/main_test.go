@@ -158,6 +158,42 @@ func TestHandleJSONPatchResponseIncludesRepositoryState(t *testing.T) {
 	}
 }
 
+func TestHandleJSONSchemaPatchReturnsAuthoritativeContract(t *testing.T) {
+	manager, err := workspace.NewManagerFromRoot(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+
+	resp := handleJSON(manager, false, []byte(`{"action":"schema","target":"patch"}`))
+	if ok, _ := resp["ok"].(bool); !ok {
+		t.Fatalf("expected success response, got %+v", resp)
+	}
+	if action, _ := resp["action"].(string); action != "schema" {
+		t.Fatalf("expected schema action, got %+v", resp)
+	}
+	if target, _ := resp["target"].(string); target != "patch" {
+		t.Fatalf("expected patch target, got %+v", resp)
+	}
+	requestSchema, ok := resp["request_schema"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected request_schema object, got %+v", resp)
+	}
+	properties, ok := requestSchema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected schema properties, got %+v", requestSchema)
+	}
+	if _, ok := properties["diff"]; !ok {
+		t.Fatalf("expected diff property, got %+v", properties)
+	}
+	notes, ok := resp["notes"].([]string)
+	if !ok || len(notes) == 0 {
+		t.Fatalf("expected notes, got %+v", resp)
+	}
+	if notes[0] != "AgentRail JSON patch endpoint accepts unified diff text in diff only." {
+		t.Fatalf("unexpected notes: %+v", notes)
+	}
+}
+
 func TestHandleJSONUsesConsistentCanonicalPathsAcrossActions(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "nested", "sample.txt")

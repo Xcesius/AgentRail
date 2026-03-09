@@ -3,6 +3,7 @@ package patchmod
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"agentrail/internal/protocol"
@@ -270,6 +271,36 @@ func TestPatchNoOpIsSuccessfulAndUnchanged(t *testing.T) {
 	}
 	if result.HunksApplied != 1 {
 		t.Fatalf("expected one accepted hunk, got %d", result.HunksApplied)
+	}
+}
+
+func TestPatchHunkOnlyDiffExplainsMissingFileHeaders(t *testing.T) {
+	root := t.TempDir()
+	manager, err := workspace.NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+
+	diff := `@@ -1,1 +1,1 @@
+-old
++new
+`
+	result, err := Apply(manager, diff, Options{})
+	if err == nil {
+		t.Fatalf("expected patch failure")
+	}
+	te, ok := protocol.AsToolError(err)
+	if !ok || te.Code != protocol.CodePatchFailed {
+		t.Fatalf("expected patch_failed, got %v", err)
+	}
+	if !strings.Contains(te.Message, "no file headers") {
+		t.Fatalf("expected missing file headers message, got %q", te.Message)
+	}
+	if te.Details["field"] != "diff" || te.Details["reason"] != "missing_file_headers" {
+		t.Fatalf("expected machine-readable diff details, got %+v", te.Details)
+	}
+	if result.RepositoryState != RepositoryStateUnchanged {
+		t.Fatalf("expected unchanged repository state, got %q", result.RepositoryState)
 	}
 }
 

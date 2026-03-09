@@ -1,4 +1,4 @@
-# AgentRail Protocol Specification (v1.1)
+# AgentRail Protocol Specification (v1.2)
 
 This document is normative for `agentrail` request and response behavior.
 
@@ -33,7 +33,7 @@ Malformed JSON **CANNOT** echo `request_id`.
 - The default dev fallback is `0.0.0-dev+0000000`.
 - `capabilities` **MUST** be a sorted, unique array of stable identifiers.
 - Clients **MUST** determine optional behavior support from `capabilities`, not from `tool_version`.
-- The minimum v1.1 Windows capability set is:
+- The minimum v1.2 Windows capability set is:
   - `exec`
   - `exec_output_budget`
   - `exec_process_tree_kill`
@@ -44,6 +44,7 @@ Malformed JSON **CANNOT** echo `request_id`.
   - `patch_expected_file_tokens`
   - `read`
   - `read_file_token`
+  - `schema`
   - `search`
   - `write`
 - Future versions **MAY** add capability identifiers. Existing identifiers **MUST** retain meaning.
@@ -140,6 +141,27 @@ Workspace boundaries:
 - Stdin payloads are capped at 64 MiB. Payloads at or above that cap **MUST** return `too_large`.
 
 ## 6. Actions
+
+## `schema`
+
+Request fields:
+
+- `action: "schema"`
+- `target` required
+
+Success fields:
+
+- `target`
+- `request_schema`
+- `examples`
+- `notes`
+
+Rules:
+
+- `target` currently supports `patch`.
+- `request_schema` describes the exact live JSON request contract for the target action.
+- For `target="patch"`, the authoritative request shape uses unified diff text in `diff`.
+- The patch schema response documents unsupported legacy fields such as `mode`, `patch`, `old_string`, and `new_string`.
 
 ## `files`
 

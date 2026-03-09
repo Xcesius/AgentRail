@@ -98,9 +98,52 @@ func Parse(diff string) (PatchSet, error) {
 	}
 
 	if len(patch.Files) == 0 {
-		return PatchSet{}, protocol.Err(protocol.CodePatchFailed, "no file patches found")
+		return PatchSet{}, noFilePatchesError(lines)
 	}
 	return patch, nil
+}
+
+func noFilePatchesError(lines []string) error {
+	details := protocol.ErrorDetails{"field": "diff"}
+	sawPatchLikeContent := false
+	sawFileHeaders := false
+	sawHunks := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(line, "--- "), strings.HasPrefix(line, "+++ "):
+			sawPatchLikeContent = true
+			sawFileHeaders = true
+		case strings.HasPrefix(line, "@@"):
+			sawPatchLikeContent = true
+			sawHunks = true
+		case strings.HasPrefix(line, "diff --git "),
+			strings.HasPrefix(line, "index "),
+			strings.HasPrefix(line, "new file mode "),
+			strings.HasPrefix(line, "deleted file mode "),
+			strings.HasPrefix(line, "*** Begin Patch"),
+			strings.HasPrefix(line, "*** Update File:"),
+			strings.HasPrefix(line, "*** Add File:"),
+			strings.HasPrefix(line, "*** Delete File:"):
+			sawPatchLikeContent = true
+		}
+	}
+
+	switch {
+	case sawHunks && !sawFileHeaders:
+		details["reason"] = "missing_file_headers"
+		return protocol.ErrDetails(protocol.CodePatchFailed, "diff contains hunks but no file headers; expected unified diff with ---/+++ file headers in diff", details)
+	case sawPatchLikeContent:
+		details["reason"] = "expected_unified_diff"
+		return protocol.ErrDetails(protocol.CodePatchFailed, "no file patches found; expected unified diff with ---/+++ file headers in diff", details)
+	default:
+		details["reason"] = "empty"
+		return protocol.ErrDetails(protocol.CodePatchFailed, "diff is empty; expected unified diff with ---/+++ file headers in diff", details)
+	}
 }
 
 func parsePatchPath(raw string) string {
