@@ -185,3 +185,7 @@ Coverage includes:
 - paged reads and file tokens
 - patch token checks, no-op behavior, and atomic validation
 - exec argv-only execution, timeout handling, and output-budget truncation
+
+## License
+
+MIT. See LICENSE.
