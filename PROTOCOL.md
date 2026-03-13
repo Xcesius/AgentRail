@@ -34,6 +34,7 @@ Malformed JSON **CANNOT** echo `request_id`.
 - `capabilities` **MUST** be a sorted, unique array of stable identifiers.
 - Clients **MUST** determine optional behavior support from `capabilities`, not from `tool_version`.
 - The minimum v1.2 Windows capability set is:
+  - `build_patch`
   - `exec`
   - `exec_output_budget`
   - `exec_process_tree_kill`
@@ -44,6 +45,7 @@ Malformed JSON **CANNOT** echo `request_id`.
   - `patch_expected_file_tokens`
   - `read`
   - `read_file_token`
+  - `replace`
   - `schema`
   - `search`
   - `write`
@@ -120,7 +122,7 @@ Denied paths:
 
 Workspace boundaries:
 
-- `write`, `patch`, and `exec.cwd` **MUST** stay inside workspace.
+- `write`, `patch`, `replace`, and `exec.cwd` **MUST** stay inside workspace.
 - `read`, `search`, and `files` are workspace-only by default and **MAY** access outside workspace only when explicitly enabled.
 
 ### Canonical response paths
@@ -158,7 +160,7 @@ Success fields:
 
 Rules:
 
-- `target` currently supports `patch`.
+- `target` currently supports `patch`, `build_patch`, and `replace`.
 - `request_schema` describes the exact live JSON request contract for the target action.
 - For `target="patch"`, the authoritative request shape uses unified diff text in `diff`.
 - The patch schema response documents unsupported legacy fields such as `mode`, `patch`, `old_string`, and `new_string`.
@@ -270,6 +272,56 @@ Rules:
 
 - CLI mode reads content from stdin.
 - Write **MUST** use temp-file + sync + replace semantics.
+- Parent directories **MUST NOT** be created unless `create_dirs=true`.
+
+## `build_patch`
+
+Request fields:
+
+- `action: "build_patch"`
+- `path` required
+- `content` required in JSON mode
+- `expected_file_token` optional `sha256:<hex>`
+
+Success fields:
+
+- `path`
+- `changed`
+- `file_token`
+- `diff`
+
+Rules:
+
+- `build_patch` **MUST** be non-mutating.
+- `build_patch` **MUST** read current target content and generate a single-file unified diff.
+- For unchanged existing content, `changed=false` and `diff=""`.
+- For missing files, `file_token` **MUST** be empty.
+
+## `replace`
+
+Request fields:
+
+- `action: "replace"`
+- `path` required
+- `content` required in JSON mode
+- `expected_file_token` optional `sha256:<hex>`
+- `create_dirs` optional, default `false`
+
+Every replace response, success or failure, **MUST** include:
+
+- `path`
+- `changed`
+- `diff`
+- `repository_state`
+- `files_changed`
+- `hunks_applied`
+- `results`
+
+Rules:
+
+- `replace` **MUST** generate a single-file unified diff from current target content and apply it atomically.
+- `replace` **MUST** be limited to create-or-overwrite of one target path; delete remains a `patch` concern.
+- `expected_file_token`, when provided, **MUST** be compared against the current target file token before mutation.
 - Parent directories **MUST NOT** be created unless `create_dirs=true`.
 
 ## `patch`

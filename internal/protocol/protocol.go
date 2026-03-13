@@ -15,6 +15,7 @@ const ProtocolVersion = 1
 var ToolVersion = "0.0.0-dev+0000000"
 
 var baseCapabilities = []string{
+	"build_patch",
 	"exec",
 	"exec_output_budget",
 	"files",
@@ -24,6 +25,7 @@ var baseCapabilities = []string{
 	"patch_expected_file_tokens",
 	"read",
 	"read_file_token",
+	"replace",
 	"schema",
 	"search",
 	"write",
@@ -55,6 +57,7 @@ type Request struct {
 	AllowOutsideWorkspace bool              `json:"allow_outside_workspace,omitempty"`
 	CreateDirs            bool              `json:"create_dirs,omitempty"`
 	Atomic                bool              `json:"atomic,omitempty"`
+	ExpectedFileToken     string            `json:"expected_file_token,omitempty"`
 	ExpectedFileTokens    map[string]string `json:"expected_file_tokens,omitempty"`
 }
 
@@ -227,6 +230,8 @@ func requestFieldName(field string) string {
 		return "create_dirs"
 	case "Atomic", "atomic":
 		return "atomic"
+	case "ExpectedFileToken", "expected_file_token":
+		return "expected_file_token"
 	case "ExpectedFileTokens", "expected_file_tokens":
 		return "expected_file_tokens"
 	default:

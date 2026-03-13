@@ -18,6 +18,8 @@ It provides:
 - `agentrail schema <target>`
 - `agentrail read <path>`
 - `agentrail write <path>`
+- `agentrail build-patch <path>`
+- `agentrail replace <path>`
 - `agentrail patch`
 - `agentrail exec -- <argv...>`
 
@@ -37,7 +39,7 @@ Safety rules:
 
 - deny `.git` and `node_modules`
 - deny Windows system directories unless they are the workspace root
-- keep `write`, `patch`, and `exec.cwd` inside workspace
+- keep `write`, `patch`, `replace`, and `exec.cwd` inside workspace
 - default `read`, `search`, and `files` to workspace-only access
 
 ## Protocol
@@ -52,7 +54,7 @@ Every response is a single JSON object and includes:
 
 Read the full normative contract in `PROTOCOL.md`.
 
-Use `agentrail schema patch` or `{"action":"schema","target":"patch"}` in JSON mode to inspect the live patch request contract.
+Use `agentrail schema <target>` or `{"action":"schema","target":"<target>"}` in JSON mode to inspect the live request contract for `patch`, `build_patch`, or `replace`.
 
 ### Read example
 
@@ -62,7 +64,7 @@ Use `agentrail schema patch` or `{"action":"schema","target":"patch"}` in JSON m
   "action": "read",
   "protocol_version": 1,
   "tool_version": "0.0.0-dev+0000000",
-  "capabilities": ["exec","exec_output_budget","exec_process_tree_kill","files","files_pagination","patch","patch_atomic","patch_expected_file_tokens","read","read_file_token","schema","search","write"],
+  "capabilities": ["build_patch","exec","exec_output_budget","exec_process_tree_kill","files","files_pagination","patch","patch_atomic","patch_expected_file_tokens","read","read_file_token","replace","schema","search","write"],
   "path": "src/main.go",
   "file_token": "sha256:...",
   "content": "...",
@@ -137,6 +139,18 @@ Patch atomically with file tokens:
 printf '{"action":"patch","atomic":true,"expected_file_tokens":{"src/main.go":"sha256:..."},"diff":"--- a/src/main.go\n+++ b/src/main.go\n@@ -1,1 +1,1 @@\n-old\n+new\n"}' | agentrail --json
 ```
 
+Build a single-file patch from desired content:
+
+```bash
+printf '{"action":"build_patch","path":"src/main.go","content":"package main\n"}' | agentrail --json
+```
+
+Replace a single file from desired content:
+
+```bash
+printf '{"action":"replace","path":"src/main.go","content":"package main\n"}' | agentrail --json
+```
+
 Patch contract schema:
 
 ```bash
@@ -147,6 +161,7 @@ Notes:
 
 - The JSON patch endpoint accepts unified diff text in `diff` only.
 - The diff must include `---` and `+++` file headers before any `@@` hunks.
+- Prefer `replace` for safe single-file full-content edits and `build_patch` when you want AgentRail to generate the unified diff.
 - Fields like `mode`, `patch`, `old_string`, and `new_string` are not part of the CLI JSON contract.
 
 Exec:
@@ -184,6 +199,7 @@ Coverage includes:
 - file pagination and cursor errors
 - paged reads and file tokens
 - patch token checks, no-op behavior, and atomic validation
+- generated single-file patch building and replace flows
 - exec argv-only execution, timeout handling, and output-budget truncation
 
 ## License

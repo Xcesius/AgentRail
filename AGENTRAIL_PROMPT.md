@@ -11,10 +11,12 @@ Required behavior:
 - Use `./agentrail.exe search <query>` to narrow scope before broad reads.
 - Use JSON `read` requests with `max_bytes` and continue with `next_start_line` when `has_more=true`.
 - Preserve `file_token` from `read` when a later patch depends on the current file state.
-- Use `patch` for targeted edits to existing files.
+- Use `replace` for safe single-file full-content edits.
+- Use `build_patch` when you need AgentRail to generate a valid single-file unified diff without mutating the repo.
+- Use raw `patch` for advanced/manual diffs and multi-file edits.
 - For multi-file edits, prefer `atomic=true` unless partial apply is intentionally acceptable.
 - Include `expected_file_tokens` when patching files that were previously read.
-- Use `write` for new files or full-file replacements.
+- Use `write` for direct file writes when you intentionally do not need diff generation.
 - Use `exec -- <argv...>` for builds, tests, and direct program execution.
 - Parse stdout as JSON only.
 - Do not rely on shell prose, shell quoting tricks, `cmd /c`, or PowerShell file commands when AgentRail can do the job.
@@ -51,6 +53,14 @@ Read:
 Patch with token protection:
 
     '{"action":"patch","atomic":true,"expected_file_tokens":{"src/main.go":"sha256:..."},"diff":"--- a/src/main.go\n+++ b/src/main.go\n@@ -1,1 +1,1 @@\n-old\n+new\n"}' | ./agentrail.exe --json
+
+Build a single-file patch:
+
+    '{"action":"build_patch","path":"src/main.go","content":"package main\n"}' | ./agentrail.exe --json
+
+Replace a single file safely:
+
+    '{"action":"replace","path":"src/main.go","content":"package main\n"}' | ./agentrail.exe --json
 
 Patch schema:
 

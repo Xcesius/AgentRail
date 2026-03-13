@@ -35,6 +35,11 @@ type patchCLIOptions struct {
 	Atomic bool
 }
 
+type replaceCLIOptions struct {
+	CreateDirs bool
+	Path       string
+}
+
 func main() {
 	manager, err := workspace.NewManager()
 	if err != nil {
@@ -204,6 +209,47 @@ func handleJSON(manager *workspace.Manager, allowOutsideFlag bool, payload []byt
 			return respond(failure(action, patchErr, fields))
 		}
 		return respond(protocol.Success(action, fields))
+	case "build_patch":
+		if strings.TrimSpace(req.Path) == "" {
+			return respond(protocol.FailureWithDetails(action, protocol.CodeInvalidRequest, "path is required", protocol.ErrorDetails{"field": "path", "reason": "required"}, buildPatchBaseFields("", "")))
+		}
+		if req.Content == nil {
+			return respond(protocol.FailureWithDetails(action, protocol.CodeInvalidRequest, "content is required in JSON mode", protocol.ErrorDetails{"field": "content", "reason": "required"}, buildPatchBaseFields(req.Path, "")))
+		}
+		generated, buildErr := patchmod.BuildFilePatch(manager, req.Path, *req.Content, req.ExpectedFileToken)
+		if buildErr != nil {
+			return respond(failure(action, buildErr, buildPatchFailureFields(generated)))
+		}
+		return respond(protocol.Success(action, buildPatchFields(generated)))
+	case "replace":
+		if strings.TrimSpace(req.Path) == "" {
+			return respond(protocol.FailureWithDetails(action, protocol.CodeInvalidRequest, "path is required", protocol.ErrorDetails{"field": "path", "reason": "required"}, replaceBaseFields("")))
+		}
+		if req.Content == nil {
+			return respond(protocol.FailureWithDetails(action, protocol.CodeInvalidRequest, "content is required in JSON mode", protocol.ErrorDetails{"field": "content", "reason": "required"}, replaceBaseFields(req.Path)))
+		}
+		generated, buildErr := patchmod.BuildFilePatch(manager, req.Path, *req.Content, req.ExpectedFileToken)
+		if buildErr != nil {
+			return respond(failure(action, buildErr, replaceFailureFields(generated, buildErr)))
+		}
+		if !generated.Changed {
+			return respond(protocol.Success(action, replaceNoOpFields(generated)))
+		}
+		createDirs := req.CreateDirs
+		expectedFileTokens := map[string]string{}
+		if req.ExpectedFileToken != "" {
+			expectedFileTokens[generated.Path] = req.ExpectedFileToken
+		}
+		applyResult, replaceErr := patchmod.Apply(manager, generated.Diff, patchmod.Options{
+			Atomic:             true,
+			ExpectedFileTokens: expectedFileTokens,
+			CreateDirs:         &createDirs,
+		})
+		fields := replaceFields(generated, applyResult)
+		if replaceErr != nil {
+			return respond(failure(action, replaceErr, fields))
+		}
+		return respond(protocol.Success(action, fields))
 	case "exec":
 		cwd, cwdErr := manager.ResolveExecCWD(req.CWD)
 		if cwdErr != nil {
@@ -335,6 +381,46 @@ func handleCLI(manager *workspace.Manager, globals globalOptions) map[string]any
 			return failure(cmd, patchErr, fields)
 		}
 		return protocol.Success(cmd, fields)
+	case "build-patch":
+		path, parseErr := parseSinglePathCLIArg(cmd, args)
+		if parseErr != nil {
+			return failure(cmd, parseErr, buildPatchBaseFields("", ""))
+		}
+		content, readErr := readStdin(true)
+		if readErr != nil {
+			return failure(cmd, readErr, buildPatchBaseFields(path, ""))
+		}
+		generated, buildErr := patchmod.BuildFilePatch(manager, path, string(content), "")
+		if buildErr != nil {
+			return failure(cmd, buildErr, buildPatchFailureFields(generated))
+		}
+		return protocol.Success(cmd, buildPatchFields(generated))
+	case "replace":
+		replaceOpts, parseErr := parseReplaceCLIArgs(args)
+		if parseErr != nil {
+			return failure(cmd, parseErr, replaceBaseFields(""))
+		}
+		content, readErr := readStdin(true)
+		if readErr != nil {
+			return failure(cmd, readErr, replaceBaseFields(replaceOpts.Path))
+		}
+		generated, buildErr := patchmod.BuildFilePatch(manager, replaceOpts.Path, string(content), "")
+		if buildErr != nil {
+			return failure(cmd, buildErr, replaceFailureFields(generated, buildErr))
+		}
+		if !generated.Changed {
+			return protocol.Success(cmd, replaceNoOpFields(generated))
+		}
+		createDirs := replaceOpts.CreateDirs
+		applyResult, replaceErr := patchmod.Apply(manager, generated.Diff, patchmod.Options{
+			Atomic:     true,
+			CreateDirs: &createDirs,
+		})
+		fields := replaceFields(generated, applyResult)
+		if replaceErr != nil {
+			return failure(cmd, replaceErr, fields)
+		}
+		return protocol.Success(cmd, fields)
 	case "exec":
 		execOpts, parseErr := parseExecCLIArgs(args)
 		if parseErr != nil {
@@ -427,6 +513,35 @@ func parsePatchCLIArgs(args []string) (patchCLIOptions, error) {
 	return options, nil
 }
 
+func parseSinglePathCLIArg(command string, args []string) (string, error) {
+	if len(args) != 1 {
+		return "", protocol.ErrDetails(protocol.CodeInvalidRequest, command+" requires <path>", protocol.ErrorDetails{"field": "path", "reason": "required"})
+	}
+	if strings.TrimSpace(args[0]) == "" {
+		return "", protocol.ErrDetails(protocol.CodeInvalidRequest, "path is required", protocol.ErrorDetails{"field": "path", "reason": "required"})
+	}
+	return args[0], nil
+}
+
+func parseReplaceCLIArgs(args []string) (replaceCLIOptions, error) {
+	var options replaceCLIOptions
+	for _, arg := range args {
+		if arg == "--create-dirs" {
+			options.CreateDirs = true
+			continue
+		}
+		if options.Path == "" {
+			options.Path = arg
+			continue
+		}
+		return replaceCLIOptions{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "replace requires <path>", protocol.ErrorDetails{"field": "path", "reason": "unexpected_argument"})
+	}
+	if strings.TrimSpace(options.Path) == "" {
+		return replaceCLIOptions{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "replace requires <path>", protocol.ErrorDetails{"field": "path", "reason": "required"})
+	}
+	return options, nil
+}
+
 func parseExecCLIArgs(args []string) (execmod.Options, error) {
 	var options execmod.Options
 	i := 0
@@ -514,9 +629,88 @@ func schemaResponse(target string) map[string]any {
 	switch normalized {
 	case "patch":
 		return protocol.Success("schema", patchSchemaFields())
+	case "build_patch":
+		return protocol.Success("schema", buildPatchSchemaFields())
+	case "replace":
+		return protocol.Success("schema", replaceSchemaFields())
 	default:
 		return protocol.FailureWithDetails("schema", protocol.CodeInvalidRequest, "unknown schema target", protocol.ErrorDetails{"field": "target", "reason": "unknown_target"}, nil)
 	}
+}
+
+func buildPatchBaseFields(path, fileToken string) map[string]any {
+	fields := map[string]any{
+		"changed": false,
+		"diff":    "",
+	}
+	if strings.TrimSpace(path) != "" {
+		fields["path"] = path
+	}
+	if strings.TrimSpace(fileToken) != "" {
+		fields["file_token"] = fileToken
+	}
+	return fields
+}
+
+func buildPatchFields(generated patchmod.GeneratedFilePatch) map[string]any {
+	fields := buildPatchBaseFields(generated.Path, generated.FileToken)
+	fields["changed"] = generated.Changed
+	fields["diff"] = generated.Diff
+	return fields
+}
+
+func buildPatchFailureFields(generated patchmod.GeneratedFilePatch) map[string]any {
+	return buildPatchBaseFields(generated.Path, generated.FileToken)
+}
+
+func replaceBaseFields(path string) map[string]any {
+	fields := patchBaseFields()
+	if strings.TrimSpace(path) != "" {
+		fields["path"] = path
+	}
+	fields["changed"] = false
+	fields["diff"] = ""
+	return fields
+}
+
+func replaceFields(generated patchmod.GeneratedFilePatch, applyResult patchmod.ApplyResult) map[string]any {
+	fields := map[string]any{
+		"path":             generated.Path,
+		"changed":          generated.Changed,
+		"diff":             generated.Diff,
+		"repository_state": applyResult.RepositoryState,
+		"files_changed":    applyResult.FilesChanged,
+		"hunks_applied":    applyResult.HunksApplied,
+		"results":          applyResult.Results,
+	}
+	return fields
+}
+
+func replaceNoOpFields(generated patchmod.GeneratedFilePatch) map[string]any {
+	fields := replaceBaseFields(generated.Path)
+	fields["results"] = []patchmod.FileResult{{
+		Path:         generated.Path,
+		OK:           true,
+		Changed:      false,
+		HunksApplied: 0,
+	}}
+	return fields
+}
+
+func replaceFailureFields(generated patchmod.GeneratedFilePatch, err error) map[string]any {
+	fields := replaceBaseFields(generated.Path)
+	if te, ok := protocol.AsToolError(err); ok && strings.TrimSpace(generated.Path) != "" {
+		fields["results"] = []patchmod.FileResult{{
+			Path:         generated.Path,
+			OK:           false,
+			Changed:      false,
+			HunksApplied: 0,
+			Error:        te.Message,
+			ErrorCode:    te.Code,
+			ErrorDetails: te.Details,
+		}}
+	}
+	return fields
 }
 
 func patchSchemaFields() map[string]any {
@@ -590,6 +784,101 @@ func patchSchemaFields() map[string]any {
 			"AgentRail JSON patch endpoint accepts unified diff text in diff only.",
 			"The diff must include ---/+++ file headers before any @@ hunks.",
 			"Fields such as mode, patch, old_string, and new_string are not part of the AgentRail CLI JSON contract.",
+		},
+	}
+}
+
+func buildPatchSchemaFields() map[string]any {
+	return map[string]any{
+		"target": "build_patch",
+		"request_schema": map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"required":             []string{"action", "path", "content"},
+			"properties": map[string]any{
+				"action": map[string]any{
+					"type":  "string",
+					"const": "build_patch",
+				},
+				"path": map[string]any{
+					"type": "string",
+				},
+				"content": map[string]any{
+					"type": "string",
+				},
+				"expected_file_token": map[string]any{
+					"type":    "string",
+					"pattern": "^sha256:[0-9a-f]{64}$",
+				},
+			},
+		},
+		"examples": []map[string]any{
+			{
+				"description": "Build a single-file patch from desired content",
+				"request": map[string]any{
+					"action":  "build_patch",
+					"path":    "sample.txt",
+					"content": "new\n",
+				},
+			},
+		},
+		"notes": []string{
+			"build_patch reads the current target content and generates a single-file unified diff.",
+			"Use build_patch when you need a valid diff artifact without mutating repository state.",
+		},
+	}
+}
+
+func replaceSchemaFields() map[string]any {
+	return map[string]any{
+		"target": "replace",
+		"request_schema": map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"required":             []string{"action", "path", "content"},
+			"properties": map[string]any{
+				"action": map[string]any{
+					"type":  "string",
+					"const": "replace",
+				},
+				"path": map[string]any{
+					"type": "string",
+				},
+				"content": map[string]any{
+					"type": "string",
+				},
+				"expected_file_token": map[string]any{
+					"type":    "string",
+					"pattern": "^sha256:[0-9a-f]{64}$",
+				},
+				"create_dirs": map[string]any{
+					"type":    "boolean",
+					"default": false,
+				},
+			},
+		},
+		"examples": []map[string]any{
+			{
+				"description": "Replace a file from full desired content",
+				"request": map[string]any{
+					"action":  "replace",
+					"path":    "sample.txt",
+					"content": "new\n",
+				},
+			},
+			{
+				"description": "Create a file and parent directories",
+				"request": map[string]any{
+					"action":      "replace",
+					"path":        "nested/sample.txt",
+					"content":     "created\n",
+					"create_dirs": true,
+				},
+			},
+		},
+		"notes": []string{
+			"replace generates a single-file unified diff from the current file content and applies it atomically.",
+			"Use replace for safe single-file edits when you have the full desired file content.",
 		},
 	}
 }

@@ -194,6 +194,118 @@ func TestHandleJSONSchemaPatchReturnsAuthoritativeContract(t *testing.T) {
 	}
 }
 
+func TestHandleJSONSchemaBuildPatchAndReplaceReturnContracts(t *testing.T) {
+	manager, err := workspace.NewManagerFromRoot(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+
+	for _, target := range []string{"build_patch", "replace"} {
+		resp := handleJSON(manager, false, []byte(`{"action":"schema","target":"`+target+`"}`))
+		if ok, _ := resp["ok"].(bool); !ok {
+			t.Fatalf("%s: expected success response, got %+v", target, resp)
+		}
+		if got, _ := resp["target"].(string); got != target {
+			t.Fatalf("%s: expected target echo, got %+v", target, resp)
+		}
+		requestSchema, ok := resp["request_schema"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s: expected request schema, got %+v", target, resp)
+		}
+		properties, ok := requestSchema["properties"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s: expected properties, got %+v", target, requestSchema)
+		}
+		if _, ok := properties["content"]; !ok {
+			t.Fatalf("%s: expected content property, got %+v", target, properties)
+		}
+		if _, ok := properties["expected_file_token"]; !ok {
+			t.Fatalf("%s: expected expected_file_token property, got %+v", target, properties)
+		}
+	}
+}
+
+func TestHandleJSONBuildPatchAndReplaceRequireContent(t *testing.T) {
+	manager, err := workspace.NewManagerFromRoot(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+
+	for _, action := range []string{"build_patch", "replace"} {
+		resp := handleJSON(manager, false, []byte(`{"action":"`+action+`","path":"sample.txt"}`))
+		if ok, _ := resp["ok"].(bool); ok {
+			t.Fatalf("%s: expected failure response, got %+v", action, resp)
+		}
+		errPayload, ok := resp["error"].(protocol.ErrorPayload)
+		if !ok {
+			t.Fatalf("%s: expected error payload, got %+v", action, resp)
+		}
+		if errPayload.Code != protocol.CodeInvalidRequest {
+			t.Fatalf("%s: expected invalid_request, got %+v", action, errPayload)
+		}
+		if errPayload.Details["field"] != "content" {
+			t.Fatalf("%s: expected content detail, got %+v", action, errPayload)
+		}
+	}
+}
+
+func TestHandleJSONBuildPatchReturnsGeneratedDiff(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "sample.txt")
+	if err := os.WriteFile(path, []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	manager, err := workspace.NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+
+	resp := handleJSON(manager, false, []byte(`{"action":"build_patch","path":"sample.txt","content":"world\n"}`))
+	if ok, _ := resp["ok"].(bool); !ok {
+		t.Fatalf("expected success response, got %+v", resp)
+	}
+	if changed, _ := resp["changed"].(bool); !changed {
+		t.Fatalf("expected changed response, got %+v", resp)
+	}
+	diff, _ := resp["diff"].(string)
+	if diff == "" {
+		t.Fatalf("expected generated diff, got %+v", resp)
+	}
+	current, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(current) != "hello\n" {
+		t.Fatalf("expected build_patch to be non-mutating, got %q", string(current))
+	}
+}
+
+func TestHandleJSONReplaceNoOpReturnsUnchangedRepositoryState(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "sample.txt")
+	if err := os.WriteFile(path, []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	manager, err := workspace.NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+
+	resp := handleJSON(manager, false, []byte(`{"action":"replace","path":"sample.txt","content":"hello\n"}`))
+	if ok, _ := resp["ok"].(bool); !ok {
+		t.Fatalf("expected success response, got %+v", resp)
+	}
+	if repositoryState, _ := resp["repository_state"].(string); repositoryState != patchmod.RepositoryStateUnchanged {
+		t.Fatalf("expected unchanged repository state, got %+v", resp)
+	}
+	results, ok := resp["results"].([]patchmod.FileResult)
+	if !ok || len(results) != 1 || !results[0].OK {
+		t.Fatalf("expected successful no-op result, got %+v", resp)
+	}
+}
+
 func TestHandleJSONUsesConsistentCanonicalPathsAcrossActions(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "nested", "sample.txt")

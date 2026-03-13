@@ -15,11 +15,13 @@ type HunkLine struct {
 }
 
 type Hunk struct {
-	OldStart int
-	OldLines int
-	NewStart int
-	NewLines int
-	Lines    []HunkLine
+	OldStart           int
+	OldLines           int
+	NewStart           int
+	NewLines           int
+	Lines              []HunkLine
+	OldNoTrailingNL    bool
+	NewNoTrailingNL    bool
 }
 
 type FilePatch struct {
@@ -189,12 +191,22 @@ func parseHunk(lines []string, start int) (Hunk, int, error) {
 	i := start + 1
 	oldCount := 0
 	newCount := 0
+	lastKind := byte(0)
 	for i < len(lines) {
 		line := lines[i]
 		if strings.HasPrefix(line, "@@ ") || strings.HasPrefix(line, "--- ") || strings.HasPrefix(line, "diff --git ") {
 			break
 		}
 		if strings.HasPrefix(line, `\ No newline at end of file`) {
+			switch lastKind {
+			case ' ':
+				hunk.OldNoTrailingNL = true
+				hunk.NewNoTrailingNL = true
+			case '-':
+				hunk.OldNoTrailingNL = true
+			case '+':
+				hunk.NewNoTrailingNL = true
+			}
 			i++
 			continue
 		}
@@ -206,6 +218,7 @@ func parseHunk(lines []string, start int) (Hunk, int, error) {
 			return Hunk{}, 0, protocol.Err(protocol.CodePatchFailed, fmt.Sprintf("invalid hunk line prefix: %q", kind))
 		}
 		hunk.Lines = append(hunk.Lines, HunkLine{Kind: kind, Text: line[1:]})
+		lastKind = kind
 		if kind == ' ' || kind == '-' {
 			oldCount++
 		}

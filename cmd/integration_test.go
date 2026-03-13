@@ -145,6 +145,164 @@ func TestAgentrailBinaryJSONPatchMalformedDiff(t *testing.T) {
 	}
 }
 
+func TestAgentrailBinaryJSONReplaceSuccess(t *testing.T) {
+	exePath := buildAgentrailBinary(t)
+	workspace := t.TempDir()
+	target := filepath.Join(workspace, "sample.txt")
+	if err := os.WriteFile(target, []byte("old\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	resp, stderr := runAgentrailJSON(t, exePath, workspace, map[string]any{
+		"action":  "replace",
+		"path":    "sample.txt",
+		"content": "new\n",
+	})
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got %q", stderr)
+	}
+	if ok, _ := resp["ok"].(bool); !ok {
+		t.Fatalf("expected success response, got %+v", resp)
+	}
+	if repositoryState, _ := resp["repository_state"].(string); repositoryState != "changed" {
+		t.Fatalf("expected changed repository state, got %+v", resp)
+	}
+	updated, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(updated) != "new\n" {
+		t.Fatalf("expected replaced file, got %q", string(updated))
+	}
+}
+
+func TestAgentrailBinaryJSONReplaceTokenMismatch(t *testing.T) {
+	exePath := buildAgentrailBinary(t)
+	workspace := t.TempDir()
+	target := filepath.Join(workspace, "sample.txt")
+	if err := os.WriteFile(target, []byte("old\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	resp, _ := runAgentrailJSON(t, exePath, workspace, map[string]any{
+		"action":              "replace",
+		"path":                "sample.txt",
+		"content":             "new\n",
+		"expected_file_token": "sha256:deadbeef",
+	})
+	if ok, _ := resp["ok"].(bool); ok {
+		t.Fatalf("expected failure response, got %+v", resp)
+	}
+	errorPayload, ok := resp["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error payload, got %+v", resp)
+	}
+	if code, _ := errorPayload["code"].(string); code != "token_mismatch" {
+		t.Fatalf("expected token_mismatch, got %+v", errorPayload)
+	}
+	unchanged, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(unchanged) != "old\n" {
+		t.Fatalf("expected file to remain unchanged, got %q", string(unchanged))
+	}
+}
+
+func TestAgentrailBinaryJSONReplaceNoOp(t *testing.T) {
+	exePath := buildAgentrailBinary(t)
+	workspace := t.TempDir()
+	target := filepath.Join(workspace, "sample.txt")
+	if err := os.WriteFile(target, []byte("same\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	resp, _ := runAgentrailJSON(t, exePath, workspace, map[string]any{
+		"action":  "replace",
+		"path":    "sample.txt",
+		"content": "same\n",
+	})
+	if ok, _ := resp["ok"].(bool); !ok {
+		t.Fatalf("expected success response, got %+v", resp)
+	}
+	if repositoryState, _ := resp["repository_state"].(string); repositoryState != "unchanged" {
+		t.Fatalf("expected unchanged repository state, got %+v", resp)
+	}
+}
+
+func TestAgentrailBinaryJSONBuildPatchOutputCanBeApplied(t *testing.T) {
+	exePath := buildAgentrailBinary(t)
+	workspace := t.TempDir()
+	target := filepath.Join(workspace, "sample.txt")
+	if err := os.WriteFile(target, []byte("old\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	buildResp, _ := runAgentrailJSON(t, exePath, workspace, map[string]any{
+		"action":  "build_patch",
+		"path":    "sample.txt",
+		"content": "new\n",
+	})
+	if ok, _ := buildResp["ok"].(bool); !ok {
+		t.Fatalf("expected build_patch success, got %+v", buildResp)
+	}
+	diff, _ := buildResp["diff"].(string)
+	if diff == "" {
+		t.Fatalf("expected generated diff, got %+v", buildResp)
+	}
+
+	patchResp, _ := runAgentrailJSON(t, exePath, workspace, map[string]any{
+		"action": "patch",
+		"diff":   diff,
+	})
+	if ok, _ := patchResp["ok"].(bool); !ok {
+		t.Fatalf("expected patch success, got %+v", patchResp)
+	}
+	updated, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(updated) != "new\n" {
+		t.Fatalf("expected patched file, got %q", string(updated))
+	}
+}
+
+func TestAgentrailBinaryCLIReplaceAndBuildPatch(t *testing.T) {
+	exePath := buildAgentrailBinary(t)
+	workspace := t.TempDir()
+	target := filepath.Join(workspace, "sample.txt")
+	if err := os.WriteFile(target, []byte("old"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	replaceResp, stderr := runAgentrailCLI(t, exePath, workspace, "new\n", "replace", "sample.txt")
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got %q", stderr)
+	}
+	if ok, _ := replaceResp["ok"].(bool); !ok {
+		t.Fatalf("expected replace success, got %+v", replaceResp)
+	}
+	updated, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(updated) != "new\n" {
+		t.Fatalf("expected CLI replace to update file, got %q", string(updated))
+	}
+
+	buildResp, stderr := runAgentrailCLI(t, exePath, workspace, "newer\n", "build-patch", "sample.txt")
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got %q", stderr)
+	}
+	if ok, _ := buildResp["ok"].(bool); !ok {
+		t.Fatalf("expected build-patch success, got %+v", buildResp)
+	}
+	diff, _ := buildResp["diff"].(string)
+	if diff == "" {
+		t.Fatalf("expected generated diff, got %+v", buildResp)
+	}
+}
+
 func buildAgentrailBinary(t *testing.T) string {
 	t.Helper()
 	cwd, err := os.Getwd()
@@ -188,6 +346,29 @@ func runAgentrailJSON(t *testing.T, exePath, workspace string, payload map[strin
 	var resp map[string]any
 	if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
 		t.Fatalf("Unmarshal response: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	return resp, strings.TrimSpace(stderr.String())
+}
+
+func runAgentrailCLI(t *testing.T, exePath, workspace, stdin string, args ...string) (map[string]any, string) {
+	t.Helper()
+
+	cmd := exec.Command(exePath, args...)
+	cmd.Dir = workspace
+	cmd.Stdin = strings.NewReader(stdin)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if _, ok := err.(*exec.ExitError); !ok {
+			t.Fatalf("agentrail CLI run failed: %v", err)
+		}
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal CLI response: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
 	}
 	return resp, strings.TrimSpace(stderr.String())
 }

@@ -23,6 +23,7 @@ const (
 type Options struct {
 	Atomic             bool
 	ExpectedFileTokens map[string]string
+	CreateDirs         *bool
 }
 
 type FileResult struct {
@@ -91,10 +92,10 @@ func Apply(manager *workspace.Manager, diff string, options Options) (ApplyResul
 			result := ApplyResult{RepositoryState: RepositoryStateUnchanged, FilesChanged: []string{}, Results: results}
 			return result, topLevelErrorFromResults(result, true)
 		}
-		return commitAtomic(plans)
+		return commitAtomic(plans, createDirsEnabled(options))
 	}
 
-	return commitNonAtomic(plans)
+	return commitNonAtomic(plans, createDirsEnabled(options))
 }
 
 func buildPlan(manager *workspace.Manager, filePatch FilePatch, expectedFileTokens map[string]string) filePlan {
@@ -172,7 +173,7 @@ func buildPlan(manager *workspace.Manager, filePatch FilePatch, expectedFileToke
 	return plan
 }
 
-func commitNonAtomic(plans []filePlan) (ApplyResult, error) {
+func commitNonAtomic(plans []filePlan, createDirs bool) (ApplyResult, error) {
 	result := ApplyResult{
 		RepositoryState: RepositoryStateUnchanged,
 		FilesChanged:    []string{},
@@ -189,7 +190,7 @@ func commitNonAtomic(plans []filePlan) (ApplyResult, error) {
 			continue
 		}
 
-		fileResult, err := applyCommittedPlan(plan)
+		fileResult, err := applyCommittedPlan(plan, createDirs)
 		result.Results = append(result.Results, fileResult)
 		if err != nil {
 			anyFailure = true
@@ -228,7 +229,7 @@ func commitNonAtomic(plans []filePlan) (ApplyResult, error) {
 	return result, nil
 }
 
-func commitAtomic(plans []filePlan) (ApplyResult, error) {
+func commitAtomic(plans []filePlan, createDirs bool) (ApplyResult, error) {
 	result := ApplyResult{
 		RepositoryState: RepositoryStateUnchanged,
 		FilesChanged:    []string{},
@@ -240,7 +241,7 @@ func commitAtomic(plans []filePlan) (ApplyResult, error) {
 		if !plan.Changed {
 			continue
 		}
-		fileResult, err := applyCommittedPlan(plan)
+		fileResult, err := applyCommittedPlan(plan, createDirs)
 		if err != nil {
 			rollbackErrs := rollbackCommittedPlans(committed)
 			repositoryState := determineAtomicFailureState(append(committed, plan), rollbackErrs)
@@ -275,7 +276,7 @@ func commitAtomic(plans []filePlan) (ApplyResult, error) {
 	return result, nil
 }
 
-func applyCommittedPlan(plan filePlan) (FileResult, error) {
+func applyCommittedPlan(plan filePlan, createDirs bool) (FileResult, error) {
 	result := FileResult{Path: plan.DisplayPath, OK: true, Changed: plan.Changed, HunksApplied: plan.HunksApplied}
 	if !plan.Changed {
 		return result, nil
@@ -289,7 +290,7 @@ func applyCommittedPlan(plan filePlan) (FileResult, error) {
 		return result, nil
 	}
 
-	if _, err := writeFileAtomic(plan.ResolvedPath, plan.UpdatedBytes, true); err != nil {
+	if _, err := writeFileAtomic(plan.ResolvedPath, plan.UpdatedBytes, createDirs); err != nil {
 		payload := protocol.GetErrorPayload(err, protocol.CodePatchFailed)
 		if payload.Details == nil {
 			payload.Details = protocol.ErrorDetails{}
@@ -323,6 +324,13 @@ func restoreOriginal(plan filePlan) error {
 	}
 	_, err := writeFileAtomic(plan.ResolvedPath, plan.OriginalBytes, true)
 	return err
+}
+
+func createDirsEnabled(options Options) bool {
+	if options.CreateDirs == nil {
+		return true
+	}
+	return *options.CreateDirs
 }
 
 func determineAtomicFailureState(plans []filePlan, rollbackErrs []error) string {
@@ -493,6 +501,7 @@ func applyToContent(content string, filePatch FilePatch) (string, int, error) {
 	result := make([]string, 0, len(lines)+8)
 	cursor := 0
 	hunksApplied := 0
+	finalHasTrailingNewline := hasTrailingNewline
 
 	for _, hunk := range filePatch.Hunks {
 		expected := hunk.OldStart - 1
@@ -526,13 +535,17 @@ func applyToContent(content string, filePatch FilePatch) (string, int, error) {
 			}
 		}
 
+		hunkTouchesEOF := idx == len(lines)
 		cursor = idx
 		hunksApplied++
+		if hunkTouchesEOF && len(result) > 0 {
+			finalHasTrailingNewline = !hunk.NewNoTrailingNL
+		}
 	}
 
 	result = append(result, lines[cursor:]...)
 	joined := strings.Join(result, "\n")
-	if len(result) > 0 && hasTrailingNewline {
+	if len(result) > 0 && finalHasTrailingNewline {
 		joined += "\n"
 	}
 	if len(result) == 0 {
