@@ -69,6 +69,9 @@ func Search(ctx context.Context, manager *workspace.Manager, options Options) ([
 	if len(paths) == 0 {
 		return []Match{}, nil
 	}
+	if options.Deterministic && options.Limit > 0 {
+		return searchDeterministicWithLimit(ctx, manager, paths, options, compiled)
+	}
 
 	workerCount := runtime.NumCPU()
 	if workerCount < 2 {
@@ -93,7 +96,7 @@ func Search(ctx context.Context, manager *workspace.Manager, options Options) ([
 					if !ok {
 						return
 					}
-					if options.Limit > 0 && int(count.Load()) >= options.Limit {
+					if !options.Deterministic && options.Limit > 0 && int(count.Load()) >= options.Limit {
 						continue
 					}
 					rel := manager.DisplayPath(path)
@@ -112,7 +115,7 @@ func Search(ctx context.Context, manager *workspace.Manager, options Options) ([
 					}
 					matchesMu.Lock()
 					for _, match := range fileMatches {
-						if options.Limit > 0 && int(count.Load()) >= options.Limit {
+						if !options.Deterministic && options.Limit > 0 && int(count.Load()) >= options.Limit {
 							break
 						}
 						matches = append(matches, match)
@@ -125,7 +128,7 @@ func Search(ctx context.Context, manager *workspace.Manager, options Options) ([
 	}
 
 	for _, path := range paths {
-		if options.Limit > 0 && int(count.Load()) >= options.Limit {
+		if !options.Deterministic && options.Limit > 0 && int(count.Load()) >= options.Limit {
 			break
 		}
 		select {
@@ -156,6 +159,29 @@ func Search(ctx context.Context, manager *workspace.Manager, options Options) ([
 		}
 	}
 
+	return matches, nil
+}
+
+func searchDeterministicWithLimit(ctx context.Context, manager *workspace.Manager, paths []string, options Options, rx *regexp.Regexp) ([]Match, error) {
+	matches := make([]Match, 0, options.Limit)
+	for _, path := range paths {
+		if ctx.Err() != nil {
+			return nil, protocol.Err(protocol.CodeSearchError, "search canceled")
+		}
+		rel := manager.DisplayPath(path)
+		if options.Glob != "" {
+			matched, globErr := filepath.Match(options.Glob, rel)
+			if globErr != nil || !matched {
+				continue
+			}
+		}
+		for _, match := range scanFile(path, rel, options, rx) {
+			matches = append(matches, match)
+			if len(matches) >= options.Limit {
+				return matches, nil
+			}
+		}
+	}
 	return matches, nil
 }
 

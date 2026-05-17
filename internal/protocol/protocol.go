@@ -17,6 +17,7 @@ var ToolVersion = "0.0.0-dev+0000000"
 var baseCapabilities = []string{
 	"build_patch",
 	"exec",
+	"exec_workspace_env",
 	"exec_output_budget",
 	"files",
 	"files_pagination",

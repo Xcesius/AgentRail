@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	osexec "os/exec"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -23,6 +25,7 @@ const (
 type Options struct {
 	Argv           []string
 	CWD            string
+	WorkspaceRoot  string
 	Env            json.RawMessage
 	TimeoutMS      int
 	MaxOutputBytes int64
@@ -53,7 +56,7 @@ func Run(options Options) (Result, error) {
 		cmd.Dir = options.CWD
 	}
 
-	env, err := parseEnv(options.Env)
+	env, err := parseEnv(options.Env, options.WorkspaceRoot)
 	if err != nil {
 		return Result{}, err
 	}
@@ -161,16 +164,23 @@ func Run(options Options) (Result, error) {
 	return result, nil
 }
 
-func parseEnv(raw json.RawMessage) ([]string, error) {
+func parseEnv(raw json.RawMessage, workspaceRoot string) ([]string, error) {
 	if len(raw) == 0 {
-		return nil, nil
+		base := envToMap(os.Environ())
+		if err := applyWorkspaceEnvDefaults(base, workspaceRoot); err != nil {
+			return nil, err
+		}
+		return mapToEnv(base), nil
 	}
 
 	var mapEnv map[string]string
 	if err := json.Unmarshal(raw, &mapEnv); err == nil {
 		base := envToMap(os.Environ())
+		if err := applyWorkspaceEnvDefaults(base, workspaceRoot); err != nil {
+			return nil, err
+		}
 		for key, value := range mapEnv {
-			base[key] = value
+			setEnvValue(base, key, value)
 		}
 		return mapToEnv(base), nil
 	}
@@ -188,6 +198,78 @@ func parseEnv(raw json.RawMessage) ([]string, error) {
 	return nil, protocol.ErrDetails(protocol.CodeInvalidRequest, "env must be an object or array", protocol.ErrorDetails{"field": "env", "reason": "invalid_type"})
 }
 
+func applyWorkspaceEnvDefaults(env map[string]string, workspaceRoot string) error {
+	root := strings.TrimSpace(workspaceRoot)
+	if root == "" {
+		return nil
+	}
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return protocol.ErrDetails(protocol.CodeExecFailed, "failed to resolve workspace runtime root", protocol.ErrorDetails{"path": filepath.ToSlash(workspaceRoot)})
+	}
+
+	dirs := map[string]string{
+		"AGENTRAIL_RUNTIME_DIR": filepath.Join(root, ".agentrail"),
+		"TMP":                   filepath.Join(root, ".agentrail", "tmp"),
+		"TEMP":                  filepath.Join(root, ".agentrail", "tmp"),
+		"TMPDIR":                filepath.Join(root, ".agentrail", "tmp"),
+		"GOCACHE":               filepath.Join(root, ".agentrail", "cache", "go-build"),
+		"GOTMPDIR":              filepath.Join(root, ".agentrail", "tmp", "go"),
+		"APPDATA":               filepath.Join(root, ".agentrail", "appdata", "roaming"),
+		"LOCALAPPDATA":          filepath.Join(root, ".agentrail", "appdata", "local"),
+		"XDG_CACHE_HOME":        filepath.Join(root, ".agentrail", "cache", "xdg"),
+		"npm_config_cache":      filepath.Join(root, ".agentrail", "cache", "npm"),
+		"PIP_CACHE_DIR":         filepath.Join(root, ".agentrail", "cache", "pip"),
+		"CARGO_HOME":            filepath.Join(root, ".agentrail", "cache", "cargo-home"),
+		"CARGO_TARGET_DIR":      filepath.Join(root, ".agentrail", "cache", "cargo-target"),
+	}
+	for key, dir := range dirs {
+		if err := ensureWorkspaceRuntimeDir(root, dir); err != nil {
+			return err
+		}
+		setEnvValue(env, key, dir)
+	}
+	return nil
+}
+
+func ensureWorkspaceRuntimeDir(workspaceRoot, dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return protocol.ErrDetails(protocol.CodeExecFailed, "failed to initialize workspace runtime directory", protocol.ErrorDetails{"path": filepath.ToSlash(dir)})
+	}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return protocol.ErrDetails(protocol.CodeExecFailed, "failed to inspect workspace runtime directory", protocol.ErrorDetails{"path": filepath.ToSlash(dir)})
+	}
+	if !pathWithin(resolved, workspaceRoot) {
+		return protocol.ErrDetails(protocol.CodeExecFailed, "workspace runtime directory escapes workspace", protocol.ErrorDetails{
+			"path":     filepath.ToSlash(dir),
+			"resolved": filepath.ToSlash(resolved),
+		})
+	}
+	return nil
+}
+
+func pathWithin(path, parent string) bool {
+	path = filepath.Clean(path)
+	parent = filepath.Clean(parent)
+	if runtime.GOOS == "windows" {
+		if strings.EqualFold(path, parent) {
+			return true
+		}
+	} else if path == parent {
+		return true
+	}
+	rel, err := filepath.Rel(parent, path)
+	if err != nil {
+		return false
+	}
+	rel = filepath.Clean(rel)
+	if rel == "." {
+		return true
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}
+
 func envToMap(entries []string) map[string]string {
 	result := make(map[string]string, len(entries))
 	for _, entry := range entries {
@@ -198,6 +280,18 @@ func envToMap(entries []string) map[string]string {
 		result[entry[:idx]] = entry[idx+1:]
 	}
 	return result
+}
+
+func setEnvValue(values map[string]string, key, value string) {
+	if runtime.GOOS == "windows" {
+		for existing := range values {
+			if strings.EqualFold(existing, key) {
+				values[existing] = value
+				return
+			}
+		}
+	}
+	values[key] = value
 }
 
 func mapToEnv(values map[string]string) []string {

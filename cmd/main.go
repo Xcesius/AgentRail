@@ -262,6 +262,7 @@ func handleJSON(manager *workspace.Manager, allowOutsideFlag bool, payload []byt
 		res, execErr := execmod.Run(execmod.Options{
 			Argv:           req.Argv,
 			CWD:            cwd,
+			WorkspaceRoot:  manager.Root,
 			Env:            req.Env,
 			TimeoutMS:      req.TimeoutMS,
 			MaxOutputBytes: maxOutputBytes,
@@ -431,6 +432,7 @@ func handleCLI(manager *workspace.Manager, globals globalOptions) map[string]any
 			return failure(cmd, cwdErr, nil)
 		}
 		execOpts.CWD = cwd
+		execOpts.WorkspaceRoot = manager.Root
 		result, runErr := execmod.Run(execOpts)
 		fields := map[string]any{
 			"exit_code":        result.ExitCode,

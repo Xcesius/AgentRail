@@ -34,7 +34,7 @@ func TestResolveWritePathRejectsDeniedDirectories(t *testing.T) {
 		t.Fatalf("NewManagerFromRoot: %v", err)
 	}
 
-	for _, input := range []string{".git/config", "node_modules/pkg/index.js"} {
+	for _, input := range []string{".agentrail/cache/file.tmp", ".git/config", "node_modules/pkg/index.js"} {
 		_, err := manager.ResolveWritePath(input)
 		if err == nil {
 			t.Fatalf("expected path to be denied for %s", input)

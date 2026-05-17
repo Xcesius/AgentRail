@@ -54,6 +54,35 @@ func TestListFilesPagePagination(t *testing.T) {
 	}
 }
 
+func TestListFilesSkipsRuntimeDirectories(t *testing.T) {
+	root := t.TempDir()
+	for rel := range map[string]string{
+		"visible.txt":              "visible",
+		".agentrail/cache/log.txt": "runtime",
+	} {
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(rel), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", rel, err)
+		}
+	}
+
+	manager, err := workspace.NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+
+	paths, err := ListFiles(root, manager)
+	if err != nil {
+		t.Fatalf("ListFiles: %v", err)
+	}
+	if !reflect.DeepEqual(paths, []string{"visible.txt"}) {
+		t.Fatalf("unexpected paths: %+v", paths)
+	}
+}
+
 func TestListFilesPageRejectsInvalidCursor(t *testing.T) {
 	root := t.TempDir()
 	for _, name := range []string{"a.txt", "b.txt"} {

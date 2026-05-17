@@ -7,6 +7,7 @@ It provides:
 - one self-contained Go binary
 - JSON-only stdout
 - workspace-aware filesystem controls
+- workspace-local exec temp/cache defaults
 - deterministic file and search operations
 - direct-argv process execution with no shell parsing
 - a normative protocol spec in `PROTOCOL.md`
@@ -37,9 +38,10 @@ Workspace root is resolved from:
 
 Safety rules:
 
-- deny `.git` and `node_modules`
+- deny `.agentrail`, `.git`, and `node_modules`
 - deny Windows system directories unless they are the workspace root
 - keep `write`, `patch`, `replace`, and `exec.cwd` inside workspace
+- rewrite inherited exec temp/cache environment variables to `.agentrail` runtime paths
 - default `read`, `search`, and `files` to workspace-only access
 
 ## Protocol
@@ -64,7 +66,7 @@ Use `agentrail schema <target>` or `{"action":"schema","target":"<target>"}` in 
   "action": "read",
   "protocol_version": 1,
   "tool_version": "0.0.0-dev+0000000",
-  "capabilities": ["build_patch","exec","exec_output_budget","exec_process_tree_kill","files","files_pagination","patch","patch_atomic","patch_expected_file_tokens","read","read_file_token","replace","schema","search","write"],
+  "capabilities": ["build_patch","exec","exec_output_budget","exec_process_tree_kill","exec_workspace_env","files","files_pagination","patch","patch_atomic","patch_expected_file_tokens","read","read_file_token","replace","schema","search","write"],
   "path": "src/main.go",
   "file_token": "sha256:...",
   "content": "...",
@@ -169,6 +171,11 @@ Exec:
 ```bash
 agentrail exec -- go test ./...
 ```
+
+Exec defaults:
+
+- When `env` is omitted or provided as an object, AgentRail points common temp/cache variables at workspace-local `.agentrail` runtime paths before applying caller overrides.
+- When `env` is an array of `KEY=VALUE` strings, it remains an exact full replacement environment.
 
 ## Build
 

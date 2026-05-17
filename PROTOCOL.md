@@ -36,6 +36,7 @@ Malformed JSON **CANNOT** echo `request_id`.
 - The minimum v1.2 Windows capability set is:
   - `build_patch`
   - `exec`
+  - `exec_workspace_env`
   - `exec_output_budget`
   - `exec_process_tree_kill`
   - `files`
@@ -117,7 +118,7 @@ Path handling rules:
 
 Denied paths:
 
-- `.git` and `node_modules` anywhere under a candidate path are denied.
+- `.agentrail`, `.git`, and `node_modules` anywhere under a candidate path are denied.
 - Windows system directories (`Windows`, `Program Files`, `Program Files (x86)`, `ProgramData` on the workspace drive) are denied unless that path is itself the workspace root.
 
 Workspace boundaries:
@@ -419,6 +420,9 @@ Rules:
 - `cwd` **MUST** pass workspace validation.
 - `env` object means merge with the process environment.
 - `env` array of `KEY=VALUE` strings means full replacement environment.
+- When `env` is omitted or an object, inherited temp/cache variables are rewritten to workspace-local `.agentrail` runtime paths before caller object overrides are applied.
+- Workspace-local exec defaults include `TMP`, `TEMP`, `TMPDIR`, `GOCACHE`, `GOTMPDIR`, `APPDATA`, `LOCALAPPDATA`, `XDG_CACHE_HOME`, `npm_config_cache`, `PIP_CACHE_DIR`, `CARGO_HOME`, and `CARGO_TARGET_DIR`.
+- `env` array requests remain exact full replacements and do not receive workspace-local defaults.
 - Non-zero exit code is still a successful transport response: `ok=true`, `exit_code != 0`.
 - Start failure returns `exec_failed`.
 

@@ -1,4 +1,5 @@
 /bin/
+/.agentrail/
 /random-*.txt
 agentrail.exe
 cmd.exe

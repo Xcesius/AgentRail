@@ -198,7 +198,7 @@ func (m *Manager) ShouldSkipDir(path string) bool {
 func (m *Manager) IsDeniedPath(path string) bool {
 	parts := strings.Split(filepath.ToSlash(filepath.Clean(path)), "/")
 	for _, part := range parts {
-		if strings.EqualFold(part, ".git") || strings.EqualFold(part, "node_modules") {
+		if strings.EqualFold(part, ".agentrail") || strings.EqualFold(part, ".git") || strings.EqualFold(part, "node_modules") {
 			return true
 		}
 	}

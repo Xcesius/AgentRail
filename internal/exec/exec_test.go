@@ -101,6 +101,78 @@ func TestRunExecCombinedOutputBudget(t *testing.T) {
 	}
 }
 
+func TestParseEnvUsesWorkspaceRuntimeDefaults(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("APPDATA", filepath.Join(t.TempDir(), "host-appdata"))
+	t.Setenv("GOCACHE", filepath.Join(t.TempDir(), "host-gocache"))
+
+	env, err := parseEnv(nil, root)
+	if err != nil {
+		t.Fatalf("parseEnv: %v", err)
+	}
+	values := envToMap(env)
+
+	wantAppData := filepath.Join(root, ".agentrail", "appdata", "roaming")
+	wantGoCache := filepath.Join(root, ".agentrail", "cache", "go-build")
+	if values["APPDATA"] != wantAppData {
+		t.Fatalf("expected APPDATA=%q, got %q", wantAppData, values["APPDATA"])
+	}
+	if values["GOCACHE"] != wantGoCache {
+		t.Fatalf("expected GOCACHE=%q, got %q", wantGoCache, values["GOCACHE"])
+	}
+	if _, err := os.Stat(wantGoCache); err != nil {
+		t.Fatalf("expected runtime directory to be created: %v", err)
+	}
+}
+
+func TestParseEnvHonorsCallerObjectOverrides(t *testing.T) {
+	root := t.TempDir()
+	override := filepath.Join(t.TempDir(), "caller-cache")
+	raw, _ := json.Marshal(map[string]string{"GOCACHE": override})
+
+	env, err := parseEnv(raw, root)
+	if err != nil {
+		t.Fatalf("parseEnv: %v", err)
+	}
+	values := envToMap(env)
+	if values["GOCACHE"] != override {
+		t.Fatalf("expected caller GOCACHE override %q, got %q", override, values["GOCACHE"])
+	}
+	if values["TMP"] != filepath.Join(root, ".agentrail", "tmp") {
+		t.Fatalf("expected workspace TMP default, got %q", values["TMP"])
+	}
+}
+
+func TestParseEnvArrayRemainsFullReplacement(t *testing.T) {
+	root := t.TempDir()
+	raw, _ := json.Marshal([]string{"ONLY=value"})
+
+	env, err := parseEnv(raw, root)
+	if err != nil {
+		t.Fatalf("parseEnv: %v", err)
+	}
+	if len(env) != 1 || env[0] != "ONLY=value" {
+		t.Fatalf("expected exact replacement env, got %+v", env)
+	}
+}
+
+func TestParseEnvRejectsRuntimeSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, ".agentrail")); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+
+	_, err := parseEnv(nil, root)
+	if err == nil {
+		t.Fatalf("expected runtime symlink escape to fail")
+	}
+	te, ok := protocol.AsToolError(err)
+	if !ok || te.Code != protocol.CodeExecFailed {
+		t.Fatalf("expected exec_failed, got %v", err)
+	}
+}
+
 func TestRunExecTimeoutKillsDescendantTree(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows-specific Job Object behavior")
