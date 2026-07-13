@@ -100,7 +100,7 @@ func handleJSON(manager *workspace.Manager, allowOutsideFlag bool, payload []byt
 		return resp
 	}
 
-	action := strings.ToLower(req.Action)
+	action := strings.ToLower(strings.TrimSpace(req.Action))
 	allowOutside := allowOutsideFlag || req.AllowOutsideWorkspace
 
 	switch action {
@@ -186,7 +186,10 @@ func handleJSON(manager *workspace.Manager, allowOutsideFlag bool, payload []byt
 		if resolveErr != nil {
 			return respond(failure(action, resolveErr, nil))
 		}
-		written, writeErr := writemod.WriteFileAtomic(resolved, []byte(*req.Content), req.CreateDirs)
+		if revalidateErr := manager.RevalidateWritePath(resolved); revalidateErr != nil {
+			return respond(failure(action, revalidateErr, nil))
+		}
+		written, writeErr := writemod.WriteFileAtomicInRoot(manager.Root, manager.DisplayPath(resolved), []byte(*req.Content), req.CreateDirs)
 		if writeErr != nil {
 			return respond(failure(action, writeErr, nil))
 		}
@@ -244,6 +247,7 @@ func handleJSON(manager *workspace.Manager, allowOutsideFlag bool, payload []byt
 			Atomic:             true,
 			ExpectedFileTokens: expectedFileTokens,
 			CreateDirs:         &createDirs,
+			ExactContents:      map[string][]byte{generated.Path: []byte(*req.Content)},
 		})
 		fields := replaceFields(generated, applyResult)
 		if replaceErr != nil {
@@ -354,7 +358,10 @@ func handleCLI(manager *workspace.Manager, globals globalOptions) map[string]any
 		if err != nil {
 			return failure(cmd, err, nil)
 		}
-		written, writeErr := writemod.WriteFileAtomic(resolved, content, false)
+		if revalidateErr := manager.RevalidateWritePath(resolved); revalidateErr != nil {
+			return failure(cmd, revalidateErr, nil)
+		}
+		written, writeErr := writemod.WriteFileAtomicInRoot(manager.Root, manager.DisplayPath(resolved), content, false)
 		if writeErr != nil {
 			return failure(cmd, writeErr, nil)
 		}
@@ -414,8 +421,9 @@ func handleCLI(manager *workspace.Manager, globals globalOptions) map[string]any
 		}
 		createDirs := replaceOpts.CreateDirs
 		applyResult, replaceErr := patchmod.Apply(manager, generated.Diff, patchmod.Options{
-			Atomic:     true,
-			CreateDirs: &createDirs,
+			Atomic:        true,
+			CreateDirs:    &createDirs,
+			ExactContents: map[string][]byte{generated.Path: content},
 		})
 		fields := replaceFields(generated, applyResult)
 		if replaceErr != nil {
@@ -892,7 +900,7 @@ func readStdin(required bool) ([]byte, error) {
 		}
 		return nil, nil
 	}
-	reader := io.LimitReader(os.Stdin, maxStdinBytes)
+	reader := io.LimitReader(os.Stdin, maxStdinBytes+1)
 	data, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, protocol.Err(protocol.CodeInvalidRequest, "unable to read stdin")

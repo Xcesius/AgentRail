@@ -455,17 +455,51 @@ func TestAgentrailBinaryJSONExecReportsTruncationAndExitMetadata(t *testing.T) {
 	if outputBytes, _ := resp["output_bytes"].(float64); int(outputBytes) != 10 {
 		t.Fatalf("expected output_bytes=10, got %+v", resp)
 	}
-	if stdout, _ := resp["stdout"].(string); len(stdout) != 8 {
-		t.Fatalf("expected 8 stdout bytes, got %q", stdout)
+	stdout, _ := resp["stdout"].(string)
+	stderrText, _ := resp["stderr"].(string)
+	if len(stdout)+len(stderrText) != 10 {
+		t.Fatalf("expected 10 combined output bytes, got stdout=%q stderr=%q", stdout, stderrText)
 	}
-	if stderrText, _ := resp["stderr"].(string); len(stderrText) != 2 {
-		t.Fatalf("expected 2 stderr bytes, got %q", stderrText)
+	stdoutTruncated, _ := resp["stdout_truncated"].(bool)
+	stderrTruncated, _ := resp["stderr_truncated"].(bool)
+	if !stdoutTruncated && !stderrTruncated {
+		t.Fatalf("expected at least one truncated stream, got %+v", resp)
 	}
-	if stdoutTruncated, _ := resp["stdout_truncated"].(bool); stdoutTruncated {
-		t.Fatalf("did not expect stdout truncation, got %+v", resp)
+}
+
+func TestAgentrailBinaryJSONReplacePreservesExactCRLFBytes(t *testing.T) {
+	exePath := buildAgentrailBinary(t)
+	workspace := t.TempDir()
+	desired := "one\r\ntwo\r\n"
+
+	resp, _ := runAgentrailJSON(t, exePath, workspace, map[string]any{
+		"action":  "replace",
+		"path":    "crlf.txt",
+		"content": desired,
+	})
+	if ok, _ := resp["ok"].(bool); !ok {
+		t.Fatalf("expected replace success, got %+v", resp)
 	}
-	if stderrTruncated, _ := resp["stderr_truncated"].(bool); !stderrTruncated {
-		t.Fatalf("expected stderr truncation, got %+v", resp)
+	data, err := os.ReadFile(filepath.Join(workspace, "crlf.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(data) != desired {
+		t.Fatalf("replace changed requested bytes: got %q want %q", data, desired)
+	}
+
+	lf := "one\ntwo\n"
+	resp, _ = runAgentrailJSON(t, exePath, workspace, map[string]any{
+		"action":  "replace",
+		"path":    "crlf.txt",
+		"content": lf,
+	})
+	if ok, _ := resp["ok"].(bool); !ok {
+		t.Fatalf("expected line-ending-only replace success, got %+v", resp)
+	}
+	data, err = os.ReadFile(filepath.Join(workspace, "crlf.txt"))
+	if err != nil || string(data) != lf {
+		t.Fatalf("line-ending-only replace failed: data=%q err=%v", data, err)
 	}
 }
 

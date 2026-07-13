@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"unicode/utf8"
 
 	filesmod "agentrail/internal/files"
 	"agentrail/internal/protocol"
@@ -38,6 +39,12 @@ type Match struct {
 	Preview string `json:"preview"`
 }
 
+const (
+	defaultMaxFileBytes int64 = 16 * 1024 * 1024
+	hardMaxFileBytes    int64 = 64 * 1024 * 1024
+	maxSearchWorkers          = 8
+)
+
 func Search(ctx context.Context, manager *workspace.Manager, options Options) ([]Match, error) {
 	if strings.TrimSpace(options.Query) == "" {
 		return nil, protocol.Err(protocol.CodeInvalidRequest, "query is required")
@@ -45,8 +52,22 @@ func Search(ctx context.Context, manager *workspace.Manager, options Options) ([
 	if options.Root == "" {
 		options.Root = manager.Root
 	}
-	if options.Deterministic == false {
-		// false is explicit, default in caller can force true.
+	if options.MaxFileBytes < 0 {
+		return nil, protocol.ErrDetails(protocol.CodeInvalidRequest, "max_file_bytes must be >= 0", protocol.ErrorDetails{"field": "max_file_bytes", "reason": "negative"})
+	}
+	if options.MaxFileBytes == 0 {
+		options.MaxFileBytes = defaultMaxFileBytes
+	}
+	if options.MaxFileBytes > hardMaxFileBytes {
+		return nil, protocol.ErrDetails(protocol.CodeInvalidRequest, "max_file_bytes exceeds limit", protocol.ErrorDetails{"field": "max_file_bytes", "reason": "too_large", "limit_bytes": hardMaxFileBytes})
+	}
+	if options.Limit < 0 {
+		return nil, protocol.ErrDetails(protocol.CodeInvalidRequest, "invalid search limit", protocol.ErrorDetails{"field": "limit", "reason": "invalid_value"})
+	}
+	if options.Glob != "" {
+		if _, err := filepath.Match(options.Glob, ""); err != nil {
+			return nil, protocol.ErrDetails(protocol.CodeInvalidRequest, "invalid glob pattern", protocol.ErrorDetails{"field": "glob", "reason": "invalid_pattern"})
+		}
 	}
 
 	var compiled *regexp.Regexp
@@ -69,13 +90,27 @@ func Search(ctx context.Context, manager *workspace.Manager, options Options) ([
 	if len(paths) == 0 {
 		return []Match{}, nil
 	}
-	if options.Deterministic && options.Limit > 0 {
-		return searchDeterministicWithLimit(ctx, manager, paths, options, compiled)
+	if options.Deterministic {
+		sort.Slice(paths, func(i, j int) bool {
+			return manager.DisplayPath(paths[i]) < manager.DisplayPath(paths[j])
+		})
+		if options.Limit > 0 {
+			return searchDeterministicWithLimit(ctx, manager, paths, options, compiled)
+		}
 	}
 
 	workerCount := runtime.NumCPU()
 	if workerCount < 2 {
 		workerCount = 2
+	}
+	if workerCount > maxSearchWorkers {
+		workerCount = maxSearchWorkers
+	}
+	// A single worker consumes the already sorted path list in order. Limiting
+	// concurrent workers before sorting would otherwise select an arbitrary
+	// subset and violate deterministic mode.
+	if options.Deterministic {
+		workerCount = 1
 	}
 	jobs := make(chan string, workerCount*2)
 
@@ -109,7 +144,7 @@ func Search(ctx context.Context, manager *workspace.Manager, options Options) ([
 							continue
 						}
 					}
-					fileMatches := scanFile(path, rel, options, compiled)
+					fileMatches := scanFile(ctx, path, rel, options, compiled)
 					if len(fileMatches) == 0 {
 						continue
 					}
@@ -127,13 +162,14 @@ func Search(ctx context.Context, manager *workspace.Manager, options Options) ([
 		}()
 	}
 
+queueLoop:
 	for _, path := range paths {
 		if !options.Deterministic && options.Limit > 0 && int(count.Load()) >= options.Limit {
 			break
 		}
 		select {
 		case <-ctx.Done():
-			break
+			break queueLoop
 		case jobs <- path:
 		}
 	}
@@ -175,7 +211,7 @@ func searchDeterministicWithLimit(ctx context.Context, manager *workspace.Manage
 				continue
 			}
 		}
-		for _, match := range scanFile(path, rel, options, rx) {
+		for _, match := range scanFile(ctx, path, rel, options, rx) {
 			matches = append(matches, match)
 			if len(matches) >= options.Limit {
 				return matches, nil
@@ -185,7 +221,7 @@ func searchDeterministicWithLimit(ctx context.Context, manager *workspace.Manage
 	return matches, nil
 }
 
-func scanFile(path, rel string, options Options, rx *regexp.Regexp) []Match {
+func scanFile(ctx context.Context, path, rel string, options Options, rx *regexp.Regexp) []Match {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil
@@ -198,7 +234,7 @@ func scanFile(path, rel string, options Options, rx *regexp.Regexp) []Match {
 		}
 	}
 
-	reader := bufio.NewReaderSize(file, 64*1024)
+	reader := bufio.NewReaderSize(io.LimitReader(file, options.MaxFileBytes+1), 64*1024)
 	peek, _ := reader.Peek(4096)
 	if textutil.IsLikelyBinary(peek) {
 		return nil
@@ -218,6 +254,9 @@ func scanFile(path, rel string, options Options, rx *regexp.Regexp) []Match {
 	var readBytes int64
 
 	for {
+		if ctx.Err() != nil {
+			break
+		}
 		lineBytes, readErr := reader.ReadBytes('\n')
 		if len(lineBytes) > 0 {
 			readBytes += int64(len(lineBytes))
@@ -237,6 +276,9 @@ func scanFile(path, rel string, options Options, rx *regexp.Regexp) []Match {
 						Col:     idx[0] + 1,
 						Preview: preview,
 					})
+					if options.Limit > 0 && len(results) >= options.Limit {
+						return results
+					}
 				}
 			} else {
 				haystack := trimmed
@@ -255,6 +297,9 @@ func scanFile(path, rel string, options Options, rx *regexp.Regexp) []Match {
 						Col:     start + idx + 1,
 						Preview: preview,
 					})
+					if options.Limit > 0 && len(results) >= options.Limit {
+						return results
+					}
 					start += idx + len(lowerQuery)
 					if start >= len(haystack) {
 						break
@@ -280,5 +325,9 @@ func bounded(text string, max int) string {
 	if len(text) <= max {
 		return text
 	}
-	return text[:max]
+	end := max
+	for end > 0 && !utf8.ValidString(text[:end]) {
+		end--
+	}
+	return text[:end]
 }

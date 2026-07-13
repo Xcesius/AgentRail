@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 
 	"agentrail/internal/filemeta"
@@ -24,6 +25,9 @@ type Options struct {
 	Atomic             bool
 	ExpectedFileTokens map[string]string
 	CreateDirs         *bool
+	// ExactContents is used by replace to preserve the caller's exact bytes
+	// while still returning and validating a unified diff artifact.
+	ExactContents map[string][]byte
 }
 
 type FileResult struct {
@@ -44,12 +48,14 @@ type ApplyResult struct {
 }
 
 type filePlan struct {
+	Manager        *workspace.Manager
 	DisplayPath    string
 	ResolvedPath   string
 	Operation      string
 	OriginalExists bool
 	OriginalBytes  []byte
 	OriginalToken  string
+	OriginalMode   os.FileMode
 	UpdatedBytes   []byte
 	HunksApplied   int
 	Changed        bool
@@ -57,9 +63,10 @@ type filePlan struct {
 }
 
 var (
-	readFile        = os.ReadFile
-	removeFile      = os.Remove
-	writeFileAtomic = writemod.WriteFileAtomic
+	readFile              = os.ReadFile
+	removeFileInRoot      = writemod.RemoveFileInRoot
+	writeFileAtomicInRoot = writemod.WriteFileAtomicInRoot
+	restoreFileInRoot     = writemod.WriteFileAtomicInRootWithMode
 )
 
 func Apply(manager *workspace.Manager, diff string, options Options) (ApplyResult, error) {
@@ -69,14 +76,26 @@ func Apply(manager *workspace.Manager, diff string, options Options) (ApplyResul
 	}
 
 	targets := make(map[string]struct{}, len(parsed.Files))
+	firstTarget := make(map[string]int, len(parsed.Files))
 	plans := make([]filePlan, 0, len(parsed.Files))
 	results := make([]FileResult, 0, len(parsed.Files))
 	anyValidationFailure := false
 
 	for _, filePatch := range parsed.Files {
-		plan := buildPlan(manager, filePatch, options.ExpectedFileTokens)
+		plan := buildPlan(manager, filePatch, options.ExpectedFileTokens, options.ExactContents)
 		plans = append(plans, plan)
 		results = append(results, plan.Result)
+		targetKey := canonicalTargetKey(plan.DisplayPath)
+		if previous, duplicate := firstTarget[targetKey]; duplicate && targetKey != "" && plan.Result.OK {
+			payload := protocol.ErrorPayload{Code: protocol.CodePatchFailed, Message: "patch contains duplicate target path", Details: protocol.ErrorDetails{"path": plan.DisplayPath, "phase": "validation", "reason": "duplicate_target"}}
+			plans[previous].Result = failureResult(plan.DisplayPath, payload)
+			plans[len(plans)-1].Result = failureResult(plan.DisplayPath, payload)
+			results[previous] = plans[previous].Result
+			results[len(results)-1] = plans[len(plans)-1].Result
+			anyValidationFailure = true
+		} else if targetKey != "" && plan.Result.OK {
+			firstTarget[targetKey] = len(plans) - 1
+		}
 		targets[plan.DisplayPath] = struct{}{}
 		if !plan.Result.OK {
 			anyValidationFailure = true
@@ -98,14 +117,21 @@ func Apply(manager *workspace.Manager, diff string, options Options) (ApplyResul
 	return commitNonAtomic(plans, createDirsEnabled(options))
 }
 
-func buildPlan(manager *workspace.Manager, filePatch FilePatch, expectedFileTokens map[string]string) filePlan {
+func canonicalTargetKey(path string) string {
+	if runtime.GOOS == "windows" {
+		return strings.ToLower(path)
+	}
+	return path
+}
+
+func buildPlan(manager *workspace.Manager, filePatch FilePatch, expectedFileTokens map[string]string, exactContents map[string][]byte) filePlan {
 	opType := patchType(filePatch)
 	target := filePatch.NewPath
 	if opType == "delete" {
 		target = filePatch.OldPath
 	}
 
-	plan := filePlan{Operation: opType}
+	plan := filePlan{Manager: manager, Operation: opType}
 	resolved, err := manager.ResolveWritePath(target)
 	if err != nil {
 		payload := protocol.GetErrorPayload(err, protocol.CodePatchFailed)
@@ -126,6 +152,12 @@ func buildPlan(manager *workspace.Manager, filePatch FilePatch, expectedFileToke
 	plan.OriginalBytes = original
 	if exists {
 		plan.OriginalToken = filemeta.TokenFromBytes(original)
+		if info, statErr := os.Stat(resolved); statErr == nil {
+			plan.OriginalMode = info.Mode()
+		} else {
+			plan.Result = failureResult(plan.DisplayPath, protocol.ErrorPayload{Code: protocol.CodePatchFailed, Message: "unable to inspect target file metadata", Details: protocol.ErrorDetails{"path": plan.DisplayPath, "phase": "validation"}})
+			return plan
+		}
 	}
 
 	if opType == "create" && exists {
@@ -158,6 +190,9 @@ func buildPlan(manager *workspace.Manager, filePatch FilePatch, expectedFileToke
 	}
 
 	plan.UpdatedBytes = []byte(updatedText)
+	if exact, ok := exactContents[plan.DisplayPath]; ok && opType != "delete" {
+		plan.UpdatedBytes = append([]byte(nil), exact...)
+	}
 	plan.HunksApplied = hunksApplied
 	if opType == "delete" && len(plan.UpdatedBytes) != 0 {
 		plan.Result = failureResult(plan.DisplayPath, protocol.ErrorPayload{Code: protocol.CodePatchFailed, Message: "delete patch did not remove all content", Details: protocol.ErrorDetails{"path": plan.DisplayPath, "phase": "validation"}})
@@ -281,16 +316,20 @@ func applyCommittedPlan(plan filePlan, createDirs bool) (FileResult, error) {
 	if !plan.Changed {
 		return result, nil
 	}
+	if err := verifyPlanSnapshot(plan); err != nil {
+		payload := protocol.GetErrorPayload(err, protocol.CodePatchFailed)
+		return failureResult(plan.DisplayPath, payload), err
+	}
 
 	if plan.Operation == "delete" {
-		if err := removeFile(plan.ResolvedPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := removeFileInRoot(plan.Manager.Root, plan.DisplayPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			payload := protocol.ErrorPayload{Code: protocol.CodePatchFailed, Message: "unable to delete file", Details: protocol.ErrorDetails{"path": plan.DisplayPath, "phase": "commit"}}
 			return failureResult(plan.DisplayPath, payload), protocol.ErrDetails(payload.Code, payload.Message, payload.Details)
 		}
 		return result, nil
 	}
 
-	if _, err := writeFileAtomic(plan.ResolvedPath, plan.UpdatedBytes, createDirs); err != nil {
+	if _, err := writeFileAtomicInRoot(plan.Manager.Root, plan.DisplayPath, plan.UpdatedBytes, createDirs); err != nil {
 		payload := protocol.GetErrorPayload(err, protocol.CodePatchFailed)
 		if payload.Details == nil {
 			payload.Details = protocol.ErrorDetails{}
@@ -300,6 +339,31 @@ func applyCommittedPlan(plan filePlan, createDirs bool) (FileResult, error) {
 		return failureResult(plan.DisplayPath, payload), protocol.ErrDetails(payload.Code, payload.Message, payload.Details)
 	}
 	return result, nil
+}
+
+func verifyPlanSnapshot(plan filePlan) error {
+	if plan.Manager != nil {
+		if err := plan.Manager.RevalidateWritePath(plan.ResolvedPath); err != nil {
+			return err
+		}
+	}
+	data, exists, err := readOriginalFile(plan.ResolvedPath)
+	if err != nil {
+		return err
+	}
+	if exists == plan.OriginalExists && bytes.Equal(data, plan.OriginalBytes) {
+		return nil
+	}
+	actualToken := ""
+	if exists {
+		actualToken = filemeta.TokenFromBytes(data)
+	}
+	return protocol.ErrDetails(protocol.CodeTokenMismatch, "target changed before commit", protocol.ErrorDetails{
+		"path":                plan.DisplayPath,
+		"expected_file_token": plan.OriginalToken,
+		"actual_file_token":   actualToken,
+		"phase":               "commit",
+	})
 }
 
 func rollbackCommittedPlans(committed []filePlan) []error {
@@ -317,12 +381,12 @@ func restoreOriginal(plan filePlan) error {
 		return nil
 	}
 	if !plan.OriginalExists {
-		if err := removeFile(plan.ResolvedPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := removeFileInRoot(plan.Manager.Root, plan.DisplayPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 		return nil
 	}
-	_, err := writeFileAtomic(plan.ResolvedPath, plan.OriginalBytes, true)
+	_, err := restoreFileInRoot(plan.Manager.Root, plan.DisplayPath, plan.OriginalBytes, true, plan.OriginalMode)
 	return err
 }
 
@@ -391,7 +455,14 @@ func snapshotDiffersFromOriginal(plan filePlan) (bool, bool) {
 	if !exists {
 		return true, true
 	}
-	return !bytes.Equal(data, plan.OriginalBytes), true
+	if !bytes.Equal(data, plan.OriginalBytes) {
+		return true, true
+	}
+	info, err := os.Stat(plan.ResolvedPath)
+	if err != nil {
+		return false, false
+	}
+	return info.Mode() != plan.OriginalMode, true
 }
 
 func determineChanged(opType string, originalExists bool, original, updated []byte) bool {
@@ -494,14 +565,12 @@ func applyToContent(content string, filePatch FilePatch) (string, int, error) {
 		return "", 0, protocol.Err(protocol.CodePatchFailed, "rename patches are not supported")
 	}
 
-	normalized := strings.ReplaceAll(content, "\r\n", "\n")
-	hasTrailingNewline := strings.HasSuffix(normalized, "\n")
-	lines := splitLines(normalized)
+	lines := splitPreservedLines(content)
+	preferredEnding := preferredLineEnding(lines)
 
-	result := make([]string, 0, len(lines)+8)
+	result := make([]contentLine, 0, len(lines)+8)
 	cursor := 0
 	hunksApplied := 0
-	finalHasTrailingNewline := hasTrailingNewline
 
 	for _, hunk := range filePatch.Hunks {
 		expected := hunk.OldStart - 1
@@ -514,22 +583,35 @@ func applyToContent(content string, filePatch FilePatch) (string, int, error) {
 
 		result = append(result, lines[cursor:expected]...)
 		idx := expected
+		lastConsumedEnding := ""
 
 		for _, line := range hunk.Lines {
 			switch line.Kind {
 			case ' ':
-				if idx >= len(lines) || lines[idx] != line.Text {
-					return "", hunksApplied, protocol.ErrDetails(protocol.CodePatchFailed, "patch context mismatch", protocol.ErrorDetails{"hunk": hunksApplied + 1, "expected": line.Text, "actual": actualLine(lines, idx)})
+				if idx >= len(lines) || lines[idx].Text != line.Text {
+					return "", hunksApplied, protocol.ErrDetails(protocol.CodePatchFailed, "patch context mismatch", protocol.ErrorDetails{"hunk": hunksApplied + 1, "expected": line.Text, "actual": actualContentLine(lines, idx)})
 				}
 				result = append(result, lines[idx])
+				lastConsumedEnding = lines[idx].Ending
 				idx++
 			case '-':
-				if idx >= len(lines) || lines[idx] != line.Text {
-					return "", hunksApplied, protocol.ErrDetails(protocol.CodePatchFailed, "patch deletion mismatch", protocol.ErrorDetails{"hunk": hunksApplied + 1, "expected": line.Text, "actual": actualLine(lines, idx)})
+				if idx >= len(lines) || lines[idx].Text != line.Text {
+					return "", hunksApplied, protocol.ErrDetails(protocol.CodePatchFailed, "patch deletion mismatch", protocol.ErrorDetails{"hunk": hunksApplied + 1, "expected": line.Text, "actual": actualContentLine(lines, idx)})
 				}
+				lastConsumedEnding = lines[idx].Ending
 				idx++
 			case '+':
-				result = append(result, line.Text)
+				if len(result) > 0 && result[len(result)-1].Ending == "" {
+					result[len(result)-1].Ending = preferredEnding
+				}
+				ending := lastConsumedEnding
+				if ending == "" && idx < len(lines) {
+					ending = lines[idx].Ending
+				}
+				if ending == "" {
+					ending = preferredEnding
+				}
+				result = append(result, contentLine{Text: line.Text, Ending: ending})
 			default:
 				return "", hunksApplied, protocol.Err(protocol.CodePatchFailed, "invalid hunk line")
 			}
@@ -539,19 +621,75 @@ func applyToContent(content string, filePatch FilePatch) (string, int, error) {
 		cursor = idx
 		hunksApplied++
 		if hunkTouchesEOF && len(result) > 0 {
-			finalHasTrailingNewline = !hunk.NewNoTrailingNL
+			if hunk.NewNoTrailingNL {
+				result[len(result)-1].Ending = ""
+			} else if result[len(result)-1].Ending == "" {
+				result[len(result)-1].Ending = preferredEnding
+			}
 		}
 	}
 
 	result = append(result, lines[cursor:]...)
-	joined := strings.Join(result, "\n")
-	if len(result) > 0 && finalHasTrailingNewline {
-		joined += "\n"
+	var joined strings.Builder
+	for _, line := range result {
+		joined.WriteString(line.Text)
+		joined.WriteString(line.Ending)
 	}
-	if len(result) == 0 {
-		joined = ""
+	return joined.String(), hunksApplied, nil
+}
+
+type contentLine struct {
+	Text   string
+	Ending string
+}
+
+func splitPreservedLines(content string) []contentLine {
+	if content == "" {
+		return nil
 	}
-	return joined, hunksApplied, nil
+	lines := make([]contentLine, 0, strings.Count(content, "\n")+1)
+	start := 0
+	for start < len(content) {
+		relative := strings.IndexByte(content[start:], '\n')
+		if relative < 0 {
+			lines = append(lines, contentLine{Text: content[start:]})
+			break
+		}
+		end := start + relative
+		textEnd := end
+		ending := "\n"
+		if textEnd > start && content[textEnd-1] == '\r' {
+			textEnd--
+			ending = "\r\n"
+		}
+		lines = append(lines, contentLine{Text: content[start:textEnd], Ending: ending})
+		start = end + 1
+	}
+	return lines
+}
+
+func preferredLineEnding(lines []contentLine) string {
+	crlf := 0
+	lf := 0
+	for _, line := range lines {
+		switch line.Ending {
+		case "\r\n":
+			crlf++
+		case "\n":
+			lf++
+		}
+	}
+	if crlf > lf {
+		return "\r\n"
+	}
+	return "\n"
+}
+
+func actualContentLine(lines []contentLine, idx int) string {
+	if idx < 0 || idx >= len(lines) {
+		return ""
+	}
+	return lines[idx].Text
 }
 
 func splitLines(content string) []string {
@@ -563,13 +701,6 @@ func splitLines(content string) []string {
 		parts = parts[:len(parts)-1]
 	}
 	return parts
-}
-
-func actualLine(lines []string, idx int) string {
-	if idx < 0 || idx >= len(lines) {
-		return ""
-	}
-	return lines[idx]
 }
 
 func canonicalResultPath(target string, details protocol.ErrorDetails) string {

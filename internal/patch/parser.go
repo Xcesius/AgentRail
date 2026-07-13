@@ -15,13 +15,13 @@ type HunkLine struct {
 }
 
 type Hunk struct {
-	OldStart           int
-	OldLines           int
-	NewStart           int
-	NewLines           int
-	Lines              []HunkLine
-	OldNoTrailingNL    bool
-	NewNoTrailingNL    bool
+	OldStart        int
+	OldLines        int
+	NewStart        int
+	NewLines        int
+	Lines           []HunkLine
+	OldNoTrailingNL bool
+	NewNoTrailingNL bool
 }
 
 type FilePatch struct {
@@ -191,6 +191,8 @@ func parseHunk(lines []string, start int) (Hunk, int, error) {
 	i := start + 1
 	oldCount := 0
 	newCount := 0
+	oldNoNLAt := -1
+	newNoNLAt := -1
 	lastKind := byte(0)
 	for i < len(lines) {
 		line := lines[i]
@@ -200,12 +202,12 @@ func parseHunk(lines []string, start int) (Hunk, int, error) {
 		if strings.HasPrefix(line, `\ No newline at end of file`) {
 			switch lastKind {
 			case ' ':
-				hunk.OldNoTrailingNL = true
-				hunk.NewNoTrailingNL = true
+				oldNoNLAt = oldCount
+				newNoNLAt = newCount
 			case '-':
-				hunk.OldNoTrailingNL = true
+				oldNoNLAt = oldCount
 			case '+':
-				hunk.NewNoTrailingNL = true
+				newNoNLAt = newCount
 			}
 			i++
 			continue
@@ -231,5 +233,7 @@ func parseHunk(lines []string, start int) (Hunk, int, error) {
 	if oldCount != hunk.OldLines || newCount != hunk.NewLines {
 		return Hunk{}, 0, protocol.Err(protocol.CodePatchFailed, "hunk line counts do not match header")
 	}
+	hunk.OldNoTrailingNL = oldNoNLAt == oldCount
+	hunk.NewNoTrailingNL = newNoNLAt == newCount
 	return hunk, i, nil
 }

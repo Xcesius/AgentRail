@@ -45,6 +45,12 @@ func Run(options Options) (Result, error) {
 	if len(options.Argv) == 0 {
 		return Result{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "argv must not be empty", protocol.ErrorDetails{"field": "argv", "reason": "required"})
 	}
+	if options.TimeoutMS < 0 {
+		return Result{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "timeout_ms must be >= 0", protocol.ErrorDetails{"field": "timeout_ms", "reason": "negative"})
+	}
+	if options.MaxOutputBytes < 0 || options.MaxOutputBytes > HardMaxOutputBytes {
+		return Result{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "invalid max_output_bytes", protocol.ErrorDetails{"field": "max_output_bytes", "reason": "invalid_value"})
+	}
 
 	maxOutputBytes := options.MaxOutputBytes
 	if maxOutputBytes == 0 {
@@ -155,7 +161,7 @@ func Run(options Options) (Result, error) {
 			result.ExitCode = exitErr.ExitCode()
 			return result, nil
 		}
-		return result, protocol.ErrDetails(protocol.CodeExecFailed, "failed to start process", protocol.ErrorDetails{"argv0": options.Argv[0], "cwd": options.CWD, "output_bytes": result.OutputBytes})
+		return result, protocol.ErrDetails(protocol.CodeExecFailed, "failed while waiting for process", protocol.ErrorDetails{"argv0": options.Argv[0], "cwd": options.CWD, "output_bytes": result.OutputBytes})
 	}
 
 	if cmd.ProcessState != nil {
@@ -180,6 +186,9 @@ func parseEnv(raw json.RawMessage, workspaceRoot string) ([]string, error) {
 			return nil, err
 		}
 		for key, value := range mapEnv {
+			if err := validateEnvEntry(key, value); err != nil {
+				return nil, err
+			}
 			setEnvValue(base, key, value)
 		}
 		return mapToEnv(base), nil
@@ -187,10 +196,21 @@ func parseEnv(raw json.RawMessage, workspaceRoot string) ([]string, error) {
 
 	var listEnv []string
 	if err := json.Unmarshal(raw, &listEnv); err == nil {
+		windowsValues := map[string]string{}
 		for _, item := range listEnv {
-			if !strings.Contains(item, "=") {
+			idx := strings.IndexByte(item, '=')
+			if idx <= 0 || strings.IndexByte(item, 0) >= 0 {
 				return nil, protocol.ErrDetails(protocol.CodeInvalidRequest, "env list entries must contain '='", protocol.ErrorDetails{"field": "env", "reason": "invalid_entry"})
 			}
+			if err := validateEnvEntry(item[:idx], item[idx+1:]); err != nil {
+				return nil, err
+			}
+			if runtime.GOOS == "windows" {
+				setEnvValue(windowsValues, item[:idx], item[idx+1:])
+			}
+		}
+		if runtime.GOOS == "windows" {
+			return mapToEnv(windowsValues), nil
 		}
 		return listEnv, nil
 	}
@@ -277,7 +297,7 @@ func envToMap(entries []string) map[string]string {
 		if idx <= 0 {
 			continue
 		}
-		result[entry[:idx]] = entry[idx+1:]
+		setEnvValue(result, entry[:idx], entry[idx+1:])
 	}
 	return result
 }
@@ -292,6 +312,13 @@ func setEnvValue(values map[string]string, key, value string) {
 		}
 	}
 	values[key] = value
+}
+
+func validateEnvEntry(key, value string) error {
+	if key == "" || strings.ContainsAny(key, "=\x00") || strings.IndexByte(value, 0) >= 0 {
+		return protocol.ErrDetails(protocol.CodeInvalidRequest, "invalid environment entry", protocol.ErrorDetails{"field": "env", "reason": "invalid_entry"})
+	}
+	return nil
 }
 
 func mapToEnv(values map[string]string) []string {

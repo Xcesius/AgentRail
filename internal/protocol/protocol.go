@@ -78,7 +78,7 @@ func ParseRequest(data []byte) (Request, error) {
 	if err := dec.Decode(&struct{}{}); err != io.EOF {
 		return Request{}, ErrDetails(CodeInvalidRequest, "request must contain exactly one JSON object", ErrorDetails{"reason": "multiple_objects"})
 	}
-	if req.Action == "" {
+	if strings.TrimSpace(req.Action) == "" {
 		return Request{}, ErrDetails(CodeInvalidRequest, "action is required", ErrorDetails{"field": "action", "reason": "required"})
 	}
 	return req, nil

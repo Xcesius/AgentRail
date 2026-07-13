@@ -45,6 +45,13 @@ func TestParseRequestRequiresAction(t *testing.T) {
 	}
 }
 
+func TestParseRequestRejectsWhitespaceOnlyAction(t *testing.T) {
+	_, err := ParseRequest([]byte(`{"action":"   "}`))
+	if err == nil {
+		t.Fatal("expected whitespace-only action to fail")
+	}
+}
+
 func TestResponsesIncludeEnvelopeFields(t *testing.T) {
 	success := Success("read", map[string]any{"path": "sample.txt"})
 	failure := FailureWithDetails("exec", CodeExecFailed, "boom", ErrorDetails{"argv0": "cmd"}, nil)

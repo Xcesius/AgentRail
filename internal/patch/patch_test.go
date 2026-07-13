@@ -274,6 +274,114 @@ func TestPatchNoOpIsSuccessfulAndUnchanged(t *testing.T) {
 	}
 }
 
+func TestAtomicPatchRejectsDuplicateCanonicalTarget(t *testing.T) {
+	root := t.TempDir()
+	manager, err := workspace.NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+	path := filepath.Join(root, "same.txt")
+	if err := os.WriteFile(path, []byte("old\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	diff := "--- a/same.txt\n+++ b/same.txt\n@@ -1,1 +1,1 @@\n-old\n+first\n" +
+		"--- a/nested/../same.txt\n+++ b/nested/../same.txt\n@@ -1,1 +1,1 @@\n-old\n+second\n"
+	result, err := Apply(manager, diff, Options{Atomic: true})
+	if err == nil {
+		t.Fatal("expected duplicate target failure")
+	}
+	if result.RepositoryState != RepositoryStateUnchanged {
+		t.Fatalf("expected unchanged repository, got %+v", result)
+	}
+	data, readErr := os.ReadFile(path)
+	if readErr != nil || string(data) != "old\n" {
+		t.Fatalf("duplicate patch changed target: data=%q err=%v", data, readErr)
+	}
+}
+
+func TestPatchPreservesMixedLineEndingsOutsideChangedLine(t *testing.T) {
+	root := t.TempDir()
+	manager, err := workspace.NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+	path := filepath.Join(root, "mixed.txt")
+	original := "one\r\ntwo\nthree\r\n"
+	if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	diff := "--- a/mixed.txt\n+++ b/mixed.txt\n@@ -2,1 +2,1 @@\n-two\n+changed\n"
+	if _, err := Apply(manager, diff, Options{Atomic: true}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if got, want := string(data), "one\r\nchanged\nthree\r\n"; got != want {
+		t.Fatalf("line endings changed: got %q want %q", got, want)
+	}
+}
+
+func TestPatchCanAppendAfterFinalLineWithoutNewline(t *testing.T) {
+	root := t.TempDir()
+	manager, err := workspace.NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+	path := filepath.Join(root, "file.txt")
+	if err := os.WriteFile(path, []byte("line"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	diff := "--- a/file.txt\n+++ b/file.txt\n@@ -1,1 +1,2 @@\n line\n\\ No newline at end of file\n+new\n"
+	if _, err := Apply(manager, diff, Options{Atomic: true}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "line\nnew\n" {
+		t.Fatalf("append after no-newline line failed: data=%q err=%v", data, err)
+	}
+}
+
+func TestPatchDetectsTargetChangeBeforeCommit(t *testing.T) {
+	root := t.TempDir()
+	manager, err := workspace.NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+	path := filepath.Join(root, "file.txt")
+	if err := os.WriteFile(path, []byte("old\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	originalRead := readFile
+	defer func() { readFile = originalRead }()
+	reads := 0
+	readFile = func(name string) ([]byte, error) {
+		reads++
+		if reads == 2 {
+			return []byte("concurrent\n"), nil
+		}
+		return originalRead(name)
+	}
+
+	diff := "--- a/file.txt\n+++ b/file.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+	result, err := Apply(manager, diff, Options{Atomic: true})
+	if err == nil {
+		t.Fatal("expected concurrent-change failure")
+	}
+	te, ok := protocol.AsToolError(err)
+	if !ok || te.Code != protocol.CodeCommitFailed {
+		t.Fatalf("expected commit_failed after rollback-safe conflict, got %v", err)
+	}
+	if result.RepositoryState != RepositoryStateUnchanged {
+		t.Fatalf("expected unchanged state, got %+v", result)
+	}
+}
+
 func TestPatchHunkOnlyDiffExplainsMissingFileHeaders(t *testing.T) {
 	root := t.TempDir()
 	manager, err := workspace.NewManagerFromRoot(root)
@@ -320,18 +428,18 @@ func TestAtomicPatchCommitFailureWithRollbackReportsCommitFailed(t *testing.T) {
 		t.Fatalf("WriteFile(two.txt): %v", err)
 	}
 
-	originalWrite := writeFileAtomic
-	defer func() { writeFileAtomic = originalWrite }()
+	originalWrite := writeFileAtomicInRoot
+	defer func() { writeFileAtomicInRoot = originalWrite }()
 	callCount := 0
-	writeFileAtomic = func(path string, data []byte, createDirs bool) (int, error) {
+	writeFileAtomicInRoot = func(root, path string, data []byte, createDirs bool) (int, error) {
 		callCount++
 		switch callCount {
 		case 1:
-			return originalWrite(path, data, createDirs)
+			return originalWrite(root, path, data, createDirs)
 		case 2:
 			return 0, protocol.Err(protocol.CodePatchFailed, "simulated commit failure")
 		default:
-			return originalWrite(path, data, createDirs)
+			return originalWrite(root, path, data, createDirs)
 		}
 	}
 
@@ -373,21 +481,24 @@ func TestAtomicPatchRollbackFailureReportsPartiallyChanged(t *testing.T) {
 		t.Fatalf("WriteFile(two.txt): %v", err)
 	}
 
-	originalWrite := writeFileAtomic
-	defer func() { writeFileAtomic = originalWrite }()
+	originalWrite := writeFileAtomicInRoot
+	defer func() { writeFileAtomicInRoot = originalWrite }()
+	originalRestore := restoreFileInRoot
+	defer func() { restoreFileInRoot = originalRestore }()
 	callCount := 0
-	writeFileAtomic = func(path string, data []byte, createDirs bool) (int, error) {
+	writeFileAtomicInRoot = func(root, path string, data []byte, createDirs bool) (int, error) {
 		callCount++
 		switch callCount {
 		case 1:
-			return originalWrite(path, data, createDirs)
+			return originalWrite(root, path, data, createDirs)
 		case 2:
 			return 0, protocol.Err(protocol.CodePatchFailed, "simulated commit failure")
-		case 3:
-			return 0, protocol.Err(protocol.CodePatchFailed, "simulated rollback failure")
 		default:
-			return originalWrite(path, data, createDirs)
+			return originalWrite(root, path, data, createDirs)
 		}
+	}
+	restoreFileInRoot = func(root, path string, data []byte, createDirs bool, mode os.FileMode) (int, error) {
+		return 0, protocol.Err(protocol.CodePatchFailed, "simulated rollback failure")
 	}
 
 	diff := "--- a/one.txt\n+++ b/one.txt\n@@ -1,1 +1,1 @@\n-old1\n+new1\n--- a/two.txt\n+++ b/two.txt\n@@ -1,1 +1,1 @@\n-old2\n+new2\n"
@@ -409,5 +520,46 @@ func TestAtomicPatchRollbackFailureReportsPartiallyChanged(t *testing.T) {
 	twoBytes, _ := os.ReadFile(twoPath)
 	if string(oneBytes) != "new1\n" || string(twoBytes) != "old2\n" {
 		t.Fatalf("expected partial rollback state, got one=%q two=%q", string(oneBytes), string(twoBytes))
+	}
+}
+
+func TestAtomicRollbackRestoresDeletedFilePermissions(t *testing.T) {
+	root := t.TempDir()
+	manager, err := workspace.NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+	deletedPath := filepath.Join(root, "deleted.txt")
+	otherPath := filepath.Join(root, "other.txt")
+	if err := os.WriteFile(deletedPath, []byte("delete\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(deleted): %v", err)
+	}
+	originalInfo, err := os.Stat(deletedPath)
+	if err != nil {
+		t.Fatalf("Stat(deleted): %v", err)
+	}
+	originalPerm := originalInfo.Mode().Perm()
+	if err := os.WriteFile(otherPath, []byte("old\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(other): %v", err)
+	}
+
+	originalWrite := writeFileAtomicInRoot
+	defer func() { writeFileAtomicInRoot = originalWrite }()
+	writeFileAtomicInRoot = func(root, path string, data []byte, createDirs bool) (int, error) {
+		return 0, protocol.Err(protocol.CodePatchFailed, "simulated commit failure")
+	}
+
+	diff := "--- a/deleted.txt\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-delete\n" +
+		"--- a/other.txt\n+++ b/other.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+	result, err := Apply(manager, diff, Options{Atomic: true})
+	if err == nil || result.RepositoryState != RepositoryStateUnchanged {
+		t.Fatalf("expected rollback-safe failure, result=%+v err=%v", result, err)
+	}
+	info, err := os.Stat(deletedPath)
+	if err != nil {
+		t.Fatalf("deleted file was not restored: %v", err)
+	}
+	if got := info.Mode().Perm(); got != originalPerm {
+		t.Fatalf("restored permissions changed: got %o want %o", got, originalPerm)
 	}
 }

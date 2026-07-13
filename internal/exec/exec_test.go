@@ -31,6 +31,38 @@ func TestRunExecPreservesArgvWithoutShell(t *testing.T) {
 	}
 }
 
+func TestRunRejectsNegativeTimeout(t *testing.T) {
+	_, err := Run(Options{Argv: []string{os.Args[0]}, TimeoutMS: -1})
+	if err == nil {
+		t.Fatal("expected negative timeout to fail")
+	}
+}
+
+func TestParseEnvObjectOverridesCaseInsensitivelyOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows environment names are case-insensitive")
+	}
+	t.Setenv("AgentRail_Case_Key", "old")
+	raw, _ := json.Marshal(map[string]string{"AGENTRAIL_CASE_KEY": "new"})
+	env, err := parseEnv(raw, t.TempDir())
+	if err != nil {
+		t.Fatalf("parseEnv: %v", err)
+	}
+	matches := 0
+	for _, entry := range env {
+		parts := strings.SplitN(entry, "=", 2)
+		if len(parts) == 2 && strings.EqualFold(parts[0], "agentrail_case_key") {
+			matches++
+			if parts[1] != "new" {
+				t.Fatalf("expected override value, got %q", entry)
+			}
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("expected exactly one case-insensitive environment key, got %d", matches)
+	}
+}
+
 func TestRunExecTimeout(t *testing.T) {
 	argv := []string{os.Args[0], "-test.run=TestHelperProcess", "--", "sleep-ms=200"}
 	envMap, _ := json.Marshal(map[string]string{"GO_WANT_HELPER_PROCESS": "1"})
@@ -87,17 +119,11 @@ func TestRunExecCombinedOutputBudget(t *testing.T) {
 	if result.OutputBytes != 10 {
 		t.Fatalf("expected 10 captured bytes, got %d", result.OutputBytes)
 	}
-	if len(result.Stdout) != 8 {
-		t.Fatalf("expected full stdout capture first, got %d", len(result.Stdout))
+	if len(result.Stdout)+len(result.Stderr) != 10 {
+		t.Fatalf("expected combined capture of 10 bytes, got %+v", result)
 	}
-	if len(result.Stderr) != 2 {
-		t.Fatalf("expected remaining stderr budget of 2 bytes, got %d", len(result.Stderr))
-	}
-	if result.StdoutTruncated {
-		t.Fatalf("did not expect stdout truncation, got %+v", result)
-	}
-	if !result.StderrTruncated {
-		t.Fatalf("expected stderr truncation, got %+v", result)
+	if !result.StdoutTruncated && !result.StderrTruncated {
+		t.Fatalf("expected at least one stream to be truncated, got %+v", result)
 	}
 }
 

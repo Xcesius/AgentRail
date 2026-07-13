@@ -1,6 +1,7 @@
 package filesmod
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -205,5 +206,55 @@ func TestListFilesCursorEncodesCanonicalRoot(t *testing.T) {
 	}
 	if payload.Root != canonicalCursorRoot(root) {
 		t.Fatalf("expected canonical cursor root %q, got %q", canonicalCursorRoot(root), payload.Root)
+	}
+}
+
+func TestListFilesBoundedPagesMatchFullSortedEnumeration(t *testing.T) {
+	root := t.TempDir()
+	manager, err := workspace.NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+	for i := 136; i >= 0; i-- {
+		name := filepath.Join(root, fmt.Sprintf("dir-%02d", i%11), fmt.Sprintf("file-%03d.txt", i))
+		if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(name, []byte("x"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+	for name := range map[string]struct{}{"a.txt": {}, "a/z.txt": {}, "a-early.txt": {}, "a0.txt": {}} {
+		path := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+
+	full, err := ListFiles(root, manager)
+	if err != nil {
+		t.Fatalf("ListFiles: %v", err)
+	}
+	var paged []string
+	cursor := ""
+	for {
+		page, err := ListFilesPage(root, manager, 7, cursor)
+		if err != nil {
+			t.Fatalf("ListFilesPage: %v", err)
+		}
+		paged = append(paged, page.Paths...)
+		if !page.HasMore {
+			break
+		}
+		if page.NextCursor == "" {
+			t.Fatal("page with has_more=true lacked a cursor")
+		}
+		cursor = page.NextCursor
+	}
+	if !reflect.DeepEqual(paged, full) {
+		t.Fatalf("paged enumeration differs from full: paged=%v full=%v", paged, full)
 	}
 }

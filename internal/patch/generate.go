@@ -49,7 +49,7 @@ func BuildFilePatch(manager *workspace.Manager, target, desiredContent, expected
 
 	originalText := normalizePatchContent(string(originalBytes))
 	desiredText := normalizePatchContent(desiredContent)
-	changed := !exists || originalText != desiredText
+	changed := !exists || string(originalBytes) != desiredContent
 
 	diff := ""
 	if changed {

@@ -39,7 +39,7 @@ Workspace root is resolved from:
 Safety rules:
 
 - deny `.agentrail`, `.git`, and `node_modules`
-- deny Windows system directories unless they are the workspace root
+- deny Windows system directories on the actual system, environment, and workspace drives unless they are the workspace root
 - keep `write`, `patch`, `replace`, and `exec.cwd` inside workspace
 - rewrite inherited exec temp/cache environment variables to `.agentrail` runtime paths
 - default `read`, `search`, and `files` to workspace-only access

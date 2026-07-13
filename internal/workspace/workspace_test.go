@@ -107,3 +107,27 @@ func TestDisplayPathOutsideWorkspaceUsesAbsoluteSlashPath(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveReadPathRejectsActualWindowsSystemDirectoryAcrossDrives(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-specific system directory policy")
+	}
+	systemRoot := os.Getenv("SystemRoot")
+	if systemRoot == "" {
+		t.Skip("SystemRoot is unavailable")
+	}
+	root := t.TempDir()
+	manager, err := NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+
+	_, err = manager.ResolveReadPath(filepath.Join(systemRoot, "win.ini"), true)
+	if err == nil {
+		t.Fatal("expected actual Windows system directory to be denied")
+	}
+	te, ok := protocol.AsToolError(err)
+	if !ok || te.Code != protocol.CodePathDenied {
+		t.Fatalf("expected path_denied, got %v", err)
+	}
+}

@@ -99,6 +99,22 @@ func (m *Manager) ResolveWritePath(input string) (string, error) {
 	return resolved, nil
 }
 
+// RevalidateWritePath repeats canonical resolution immediately before a
+// mutation and rejects a path whose resolved target changed after planning.
+func (m *Manager) RevalidateWritePath(resolved string) error {
+	current, err := m.ResolveWritePath(resolved)
+	if err != nil {
+		return err
+	}
+	if !equalPath(current, resolved) {
+		return protocol.ErrDetails(protocol.CodePathDenied, "resolved write target changed before commit", protocol.ErrorDetails{
+			"path":   m.DisplayPath(current),
+			"policy": "path_changed",
+		})
+	}
+	return nil
+}
+
 func (m *Manager) ResolveDirPath(input string, allowOutside bool) (string, error) {
 	resolved, err := m.ResolveReadPath(input, allowOutside)
 	if err != nil {
@@ -298,16 +314,47 @@ func systemDirsForPath(path string) []string {
 	if runtime.GOOS != "windows" {
 		return nil
 	}
-	drive := filepath.VolumeName(path)
-	if drive == "" {
-		drive = "C:"
+
+	candidates := []string{
+		os.Getenv("SystemRoot"),
+		os.Getenv("windir"),
+		os.Getenv("ProgramFiles"),
+		os.Getenv("ProgramW6432"),
+		os.Getenv("ProgramFiles(x86)"),
+		os.Getenv("ProgramData"),
 	}
-	return []string{
-		filepath.Join(drive, "Windows"),
-		filepath.Join(drive, "Program Files"),
-		filepath.Join(drive, "Program Files (x86)"),
-		filepath.Join(drive, "ProgramData"),
+
+	drives := []string{filepath.VolumeName(path), os.Getenv("SystemDrive")}
+	if systemRoot := os.Getenv("SystemRoot"); systemRoot != "" {
+		drives = append(drives, filepath.VolumeName(systemRoot))
 	}
+	for _, drive := range drives {
+		if drive == "" {
+			continue
+		}
+		candidates = append(candidates,
+			filepath.Join(drive, "Windows"),
+			filepath.Join(drive, "Program Files"),
+			filepath.Join(drive, "Program Files (x86)"),
+			filepath.Join(drive, "ProgramData"),
+		)
+	}
+
+	seen := make(map[string]struct{}, len(candidates))
+	result := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if strings.TrimSpace(candidate) == "" || !filepath.IsAbs(candidate) {
+			continue
+		}
+		clean := filepath.Clean(candidate)
+		key := strings.ToLower(clean)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, clean)
+	}
+	return result
 }
 
 func isWithin(path, parent string) bool {

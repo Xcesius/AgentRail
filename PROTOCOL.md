@@ -114,12 +114,13 @@ Path handling rules:
 - Paths **MUST** be resolved through absolute, cleaned, symlink-aware resolution.
 - Existing paths **MUST** be resolved through symlinks.
 - Non-existing paths **MUST** resolve the nearest existing ancestor through symlinks, then append remaining segments.
+- Workspace mutations **MUST** use handle-rooted operations so a concurrent symlink or reparse-point change cannot escape the workspace after validation.
 - Volume-relative Windows paths such as `C:foo` **MUST NOT** be accepted.
 
 Denied paths:
 
 - `.agentrail`, `.git`, and `node_modules` anywhere under a candidate path are denied.
-- Windows system directories (`Windows`, `Program Files`, `Program Files (x86)`, `ProgramData` on the workspace drive) are denied unless that path is itself the workspace root.
+- Windows system directories discovered from the process environment, system drive, and workspace drive (`Windows`, `Program Files`, `Program Files (x86)`, and `ProgramData`) are denied unless that path is itself the workspace root.
 
 Workspace boundaries:
 
@@ -141,6 +142,7 @@ Workspace boundaries:
 - `files.paths` **MUST** be lexicographically sorted.
 - `search.matches` **MUST** be sorted by `(path, line, col)` when deterministic mode is enabled.
 - JSON `search.deterministic` defaults to `true` when omitted.
+- Search defaults to 16 MiB per file. An explicit per-file limit may not exceed 64 MiB.
 - Stdin payloads are capped at 64 MiB. Payloads at or above that cap **MUST** return `too_large`.
 
 ## 6. Actions
@@ -205,7 +207,7 @@ Request fields:
 - `regex` optional
 - `glob` optional
 - `limit` optional
-- `max_file_bytes` optional
+- `max_file_bytes` optional, default `16777216`, maximum `67108864`
 - `deterministic` optional, default `true`
 - `allow_outside_workspace` optional, default `false`
 
@@ -219,6 +221,7 @@ Rules:
 - Binary files are skipped silently.
 - `preview` is the matched line truncated to the implementation preview limit.
 - If `limit > 0`, returned matches **MUST NOT** exceed `limit`.
+- Invalid glob syntax, negative limits, and `max_file_bytes` values above the documented maximum **MUST** return `invalid_request`.
 
 ## `read`
 
@@ -321,6 +324,7 @@ Every replace response, success or failure, **MUST** include:
 Rules:
 
 - `replace` **MUST** generate a single-file unified diff from current target content and apply it atomically.
+- `replace` **MUST** write the exact requested content bytes, including line-ending-only changes.
 - `replace` **MUST** be limited to create-or-overwrite of one target path; delete remains a `patch` concern.
 - `expected_file_token`, when provided, **MUST** be compared against the current target file token before mutation.
 - Parent directories **MUST NOT** be created unless `create_dirs=true`.
@@ -374,6 +378,7 @@ Rules:
 - Keys **MUST** match canonical workspace-relative target paths.
 - A token mismatch **MUST** fail deterministically with `token_mismatch`.
 - Token mismatch before any writes yields `repository_state="unchanged"`.
+- The target snapshot **MUST** be revalidated immediately before each commit so a change after planning cannot be overwritten silently.
 
 ### `patch.atomic`
 
@@ -386,6 +391,7 @@ When `atomic=false`:
 When `atomic=true`:
 
 - The tool **MUST** complete parse, path resolution, token validation, and in-memory patch application for all targets before any repository write occurs.
+- Multiple file sections resolving to the same canonical target **MUST** fail validation before any write.
 - Any pre-commit validation failure **MUST** perform zero repository writes and **MUST** return `repository_state="unchanged"`.
 - Commit uses staged temp writes plus rollback metadata. This is logical atomicity with rollback, not a filesystem transaction.
 - If commit fails and rollback fully restores prior state, the response **MUST** use `commit_failed` and `repository_state="unchanged"`.
@@ -419,6 +425,7 @@ Rules:
 - `argv` **MUST** execute as direct argv. No shell parsing is performed.
 - `cwd` **MUST** pass workspace validation.
 - `env` object means merge with the process environment.
+- On Windows, object-form environment merging **MUST** treat variable names case-insensitively.
 - `env` array of `KEY=VALUE` strings means full replacement environment.
 - When `env` is omitted or an object, inherited temp/cache variables are rewritten to workspace-local `.agentrail` runtime paths before caller object overrides are applied.
 - Workspace-local exec defaults include `TMP`, `TEMP`, `TMPDIR`, `GOCACHE`, `GOTMPDIR`, `APPDATA`, `LOCALAPPDATA`, `XDG_CACHE_HOME`, `npm_config_cache`, `PIP_CACHE_DIR`, `CARGO_HOME`, and `CARGO_TARGET_DIR`.

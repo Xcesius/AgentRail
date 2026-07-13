@@ -75,3 +75,54 @@ func TestSearchSkipsBinaryFilesAndHonorsLimit(t *testing.T) {
 		t.Fatalf("expected deterministic first match from a.txt, got %+v", matches[0])
 	}
 }
+
+func TestSearchRejectsInvalidGlob(t *testing.T) {
+	root := t.TempDir()
+	manager, err := workspace.NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+
+	_, err = Search(context.Background(), manager, Options{Query: "needle", Glob: "["})
+	if err == nil {
+		t.Fatal("expected invalid glob error")
+	}
+}
+
+func TestSearchRejectsNegativeMaxFileBytes(t *testing.T) {
+	root := t.TempDir()
+	manager, err := workspace.NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+
+	_, err = Search(context.Background(), manager, Options{Query: "needle", MaxFileBytes: -1})
+	if err == nil {
+		t.Fatal("expected negative max_file_bytes error")
+	}
+}
+
+func TestDeterministicLimitUsesDisplayPathOrderingAcrossDirectories(t *testing.T) {
+	root := t.TempDir()
+	manager, err := workspace.NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+	for name := range map[string]struct{}{"a/z.txt": {}, "a0.txt": {}} {
+		path := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("needle\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+
+	matches, err := Search(context.Background(), manager, Options{Query: "needle", Limit: 1, Deterministic: true})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(matches) != 1 || matches[0].Path != "a/z.txt" {
+		t.Fatalf("expected display-path-first match, got %+v", matches)
+	}
+}
