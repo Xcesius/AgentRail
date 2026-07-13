@@ -142,13 +142,14 @@ func handleJSON(manager *workspace.Manager, allowOutsideFlag bool, payload []byt
 			Limit:         req.Limit,
 			MaxFileBytes:  req.MaxFileBytes,
 			Deterministic: deterministic,
+			AllowOutside:  allowOutside,
 		})
 		if searchErr != nil {
 			return respond(failure(action, searchErr, nil))
 		}
 		return respond(protocol.Success(action, map[string]any{"matches": matches}))
 	case "read":
-		if strings.TrimSpace(req.Path) == "" {
+		if req.Path == "" {
 			return respond(protocol.FailureWithDetails(action, protocol.CodeInvalidRequest, "path is required", protocol.ErrorDetails{"field": "path", "reason": "required"}, nil))
 		}
 		resolved, resolveErr := manager.ResolveReadPath(req.Path, allowOutside)
@@ -176,7 +177,7 @@ func handleJSON(manager *workspace.Manager, allowOutsideFlag bool, payload []byt
 		}
 		return respond(protocol.Success(action, fields))
 	case "write":
-		if strings.TrimSpace(req.Path) == "" {
+		if req.Path == "" {
 			return respond(protocol.FailureWithDetails(action, protocol.CodeInvalidRequest, "path is required", protocol.ErrorDetails{"field": "path", "reason": "required"}, nil))
 		}
 		if req.Content == nil {
@@ -213,7 +214,7 @@ func handleJSON(manager *workspace.Manager, allowOutsideFlag bool, payload []byt
 		}
 		return respond(protocol.Success(action, fields))
 	case "build_patch":
-		if strings.TrimSpace(req.Path) == "" {
+		if req.Path == "" {
 			return respond(protocol.FailureWithDetails(action, protocol.CodeInvalidRequest, "path is required", protocol.ErrorDetails{"field": "path", "reason": "required"}, buildPatchBaseFields("", "")))
 		}
 		if req.Content == nil {
@@ -225,7 +226,7 @@ func handleJSON(manager *workspace.Manager, allowOutsideFlag bool, payload []byt
 		}
 		return respond(protocol.Success(action, buildPatchFields(generated)))
 	case "replace":
-		if strings.TrimSpace(req.Path) == "" {
+		if req.Path == "" {
 			return respond(protocol.FailureWithDetails(action, protocol.CodeInvalidRequest, "path is required", protocol.ErrorDetails{"field": "path", "reason": "required"}, replaceBaseFields("")))
 		}
 		if req.Content == nil {
@@ -319,6 +320,7 @@ func handleCLI(manager *workspace.Manager, globals globalOptions) map[string]any
 			CaseSensitive: false,
 			Regex:         false,
 			Deterministic: true,
+			AllowOutside:  globals.AllowOutside,
 		})
 		if err != nil {
 			return failure(cmd, err, nil)
@@ -527,7 +529,7 @@ func parseSinglePathCLIArg(command string, args []string) (string, error) {
 	if len(args) != 1 {
 		return "", protocol.ErrDetails(protocol.CodeInvalidRequest, command+" requires <path>", protocol.ErrorDetails{"field": "path", "reason": "required"})
 	}
-	if strings.TrimSpace(args[0]) == "" {
+	if args[0] == "" {
 		return "", protocol.ErrDetails(protocol.CodeInvalidRequest, "path is required", protocol.ErrorDetails{"field": "path", "reason": "required"})
 	}
 	return args[0], nil
@@ -546,7 +548,7 @@ func parseReplaceCLIArgs(args []string) (replaceCLIOptions, error) {
 		}
 		return replaceCLIOptions{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "replace requires <path>", protocol.ErrorDetails{"field": "path", "reason": "unexpected_argument"})
 	}
-	if strings.TrimSpace(options.Path) == "" {
+	if options.Path == "" {
 		return replaceCLIOptions{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "replace requires <path>", protocol.ErrorDetails{"field": "path", "reason": "required"})
 	}
 	return options, nil
@@ -653,7 +655,7 @@ func buildPatchBaseFields(path, fileToken string) map[string]any {
 		"changed": false,
 		"diff":    "",
 	}
-	if strings.TrimSpace(path) != "" {
+	if path != "" {
 		fields["path"] = path
 	}
 	if strings.TrimSpace(fileToken) != "" {
@@ -675,7 +677,7 @@ func buildPatchFailureFields(generated patchmod.GeneratedFilePatch) map[string]a
 
 func replaceBaseFields(path string) map[string]any {
 	fields := patchBaseFields()
-	if strings.TrimSpace(path) != "" {
+	if path != "" {
 		fields["path"] = path
 	}
 	fields["changed"] = false
@@ -709,7 +711,7 @@ func replaceNoOpFields(generated patchmod.GeneratedFilePatch) map[string]any {
 
 func replaceFailureFields(generated patchmod.GeneratedFilePatch, err error) map[string]any {
 	fields := replaceBaseFields(generated.Path)
-	if te, ok := protocol.AsToolError(err); ok && strings.TrimSpace(generated.Path) != "" {
+	if te, ok := protocol.AsToolError(err); ok && generated.Path != "" {
 		fields["results"] = []patchmod.FileResult{{
 			Path:         generated.Path,
 			OK:           false,

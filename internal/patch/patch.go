@@ -272,12 +272,13 @@ func commitAtomic(plans []filePlan, createDirs bool) (ApplyResult, error) {
 	}
 	committed := make([]filePlan, 0, len(plans))
 
-	for _, plan := range plans {
+	for planIndex, plan := range plans {
 		if !plan.Changed {
 			continue
 		}
 		fileResult, err := applyCommittedPlan(plan, createDirs)
 		if err != nil {
+			plans[planIndex].Result = fileResult
 			rollbackErrs := rollbackCommittedPlans(committed)
 			repositoryState := determineAtomicFailureState(append(committed, plan), rollbackErrs)
 			result.RepositoryState = repositoryState
@@ -290,7 +291,6 @@ func commitAtomic(plans []filePlan, createDirs bool) (ApplyResult, error) {
 		committed = append(committed, plan)
 		result.FilesChanged = append(result.FilesChanged, plan.DisplayPath)
 		result.HunksApplied += plan.HunksApplied
-		_ = fileResult
 	}
 
 	for _, plan := range plans {
@@ -706,7 +706,7 @@ func splitLines(content string) []string {
 func canonicalResultPath(target string, details protocol.ErrorDetails) string {
 	if details != nil {
 		if path, ok := details["path"].(string); ok {
-			if strings.TrimSpace(path) != "" {
+			if path != "" {
 				return path
 			}
 		}

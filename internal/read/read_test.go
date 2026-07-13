@@ -103,6 +103,42 @@ func TestReadTooLargeWhenFirstSelectedLineExceedsMaxBytes(t *testing.T) {
 	}
 }
 
+func TestReadRejectsInvalidMaxBytesBounds(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sample.txt")
+	if err := os.WriteFile(path, []byte("line\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	for _, maxBytes := range []int64{-1, hardMaxBytes + 1} {
+		_, err := ReadFile(path, Options{MaxBytes: maxBytes})
+		if err == nil {
+			t.Fatalf("expected max_bytes=%d to fail", maxBytes)
+		}
+		toolErr, ok := protocol.AsToolError(err)
+		if !ok || toolErr.Code != protocol.CodeInvalidRequest {
+			t.Fatalf("expected invalid_request for %d, got %v", maxBytes, err)
+		}
+	}
+}
+
+func TestReadVeryLargeLineReportsSizeWithBoundedOutput(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wide.txt")
+	content := strings.Repeat("x", 2*1024*1024) + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	_, err := ReadFile(path, Options{MaxBytes: 8})
+	if err == nil {
+		t.Fatal("expected too_large")
+	}
+	toolErr, ok := protocol.AsToolError(err)
+	if !ok || toolErr.Code != protocol.CodeTooLarge {
+		t.Fatalf("expected too_large, got %v", err)
+	}
+	if toolErr.Details["actual_bytes"] != int64(len(content)) {
+		t.Fatalf("unexpected actual_bytes: %+v", toolErr.Details)
+	}
+}
+
 func TestReadLargeLineOver64KiB(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "wide.txt")

@@ -20,6 +20,7 @@ import (
 const (
 	DefaultMaxOutputBytes int64 = 262144
 	HardMaxOutputBytes    int64 = 4194304
+	maxTimeoutMS          int64 = int64(^uint64(0)>>1) / int64(time.Millisecond)
 )
 
 type Options struct {
@@ -47,6 +48,9 @@ func Run(options Options) (Result, error) {
 	}
 	if options.TimeoutMS < 0 {
 		return Result{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "timeout_ms must be >= 0", protocol.ErrorDetails{"field": "timeout_ms", "reason": "negative"})
+	}
+	if int64(options.TimeoutMS) > maxTimeoutMS {
+		return Result{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "timeout_ms exceeds supported duration", protocol.ErrorDetails{"field": "timeout_ms", "reason": "too_large", "maximum": maxTimeoutMS})
 	}
 	if options.MaxOutputBytes < 0 || options.MaxOutputBytes > HardMaxOutputBytes {
 		return Result{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "invalid max_output_bytes", protocol.ErrorDetails{"field": "max_output_bytes", "reason": "invalid_value"})
@@ -219,7 +223,7 @@ func parseEnv(raw json.RawMessage, workspaceRoot string) ([]string, error) {
 }
 
 func applyWorkspaceEnvDefaults(env map[string]string, workspaceRoot string) error {
-	root := strings.TrimSpace(workspaceRoot)
+	root := workspaceRoot
 	if root == "" {
 		return nil
 	}
@@ -227,6 +231,11 @@ func applyWorkspaceEnvDefaults(env map[string]string, workspaceRoot string) erro
 	if err != nil {
 		return protocol.ErrDetails(protocol.CodeExecFailed, "failed to resolve workspace runtime root", protocol.ErrorDetails{"path": filepath.ToSlash(workspaceRoot)})
 	}
+	rootHandle, err := os.OpenRoot(root)
+	if err != nil {
+		return protocol.ErrDetails(protocol.CodeExecFailed, "failed to open workspace runtime root", protocol.ErrorDetails{"path": filepath.ToSlash(root)})
+	}
+	defer rootHandle.Close()
 
 	dirs := map[string]string{
 		"AGENTRAIL_RUNTIME_DIR": filepath.Join(root, ".agentrail"),
@@ -244,7 +253,7 @@ func applyWorkspaceEnvDefaults(env map[string]string, workspaceRoot string) erro
 		"CARGO_TARGET_DIR":      filepath.Join(root, ".agentrail", "cache", "cargo-target"),
 	}
 	for key, dir := range dirs {
-		if err := ensureWorkspaceRuntimeDir(root, dir); err != nil {
+		if err := ensureWorkspaceRuntimeDir(rootHandle, root, dir); err != nil {
 			return err
 		}
 		setEnvValue(env, key, dir)
@@ -252,42 +261,15 @@ func applyWorkspaceEnvDefaults(env map[string]string, workspaceRoot string) erro
 	return nil
 }
 
-func ensureWorkspaceRuntimeDir(workspaceRoot, dir string) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+func ensureWorkspaceRuntimeDir(rootHandle *os.Root, workspaceRoot, dir string) error {
+	relative, err := filepath.Rel(workspaceRoot, dir)
+	if err != nil || relative == ".." || filepath.IsAbs(relative) || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+		return protocol.ErrDetails(protocol.CodeExecFailed, "workspace runtime directory escapes workspace", protocol.ErrorDetails{"path": filepath.ToSlash(dir)})
+	}
+	if err := rootHandle.MkdirAll(relative, 0o755); err != nil {
 		return protocol.ErrDetails(protocol.CodeExecFailed, "failed to initialize workspace runtime directory", protocol.ErrorDetails{"path": filepath.ToSlash(dir)})
 	}
-	resolved, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		return protocol.ErrDetails(protocol.CodeExecFailed, "failed to inspect workspace runtime directory", protocol.ErrorDetails{"path": filepath.ToSlash(dir)})
-	}
-	if !pathWithin(resolved, workspaceRoot) {
-		return protocol.ErrDetails(protocol.CodeExecFailed, "workspace runtime directory escapes workspace", protocol.ErrorDetails{
-			"path":     filepath.ToSlash(dir),
-			"resolved": filepath.ToSlash(resolved),
-		})
-	}
 	return nil
-}
-
-func pathWithin(path, parent string) bool {
-	path = filepath.Clean(path)
-	parent = filepath.Clean(parent)
-	if runtime.GOOS == "windows" {
-		if strings.EqualFold(path, parent) {
-			return true
-		}
-	} else if path == parent {
-		return true
-	}
-	rel, err := filepath.Rel(parent, path)
-	if err != nil {
-		return false
-	}
-	rel = filepath.Clean(rel)
-	if rel == "." {
-		return true
-	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }
 
 func envToMap(entries []string) map[string]string {

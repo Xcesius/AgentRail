@@ -27,6 +27,21 @@ func TestResolveWritePathRejectsTraversal(t *testing.T) {
 	}
 }
 
+func TestResolveWritePathPreservesLeadingSpace(t *testing.T) {
+	root := t.TempDir()
+	manager, err := NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+	resolved, err := manager.ResolveWritePath(" leading.txt")
+	if err != nil {
+		t.Fatalf("ResolveWritePath: %v", err)
+	}
+	if filepath.Base(resolved) != " leading.txt" {
+		t.Fatalf("path was trimmed: %q", resolved)
+	}
+}
+
 func TestResolveWritePathRejectsDeniedDirectories(t *testing.T) {
 	root := t.TempDir()
 	manager, err := NewManagerFromRoot(root)

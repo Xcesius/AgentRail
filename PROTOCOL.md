@@ -143,6 +143,7 @@ Workspace boundaries:
 - `search.matches` **MUST** be sorted by `(path, line, col)` when deterministic mode is enabled.
 - JSON `search.deterministic` defaults to `true` when omitted.
 - Search defaults to 16 MiB per file. An explicit per-file limit may not exceed 64 MiB.
+- Read output defaults to 1 MiB. An explicit `max_bytes` may not exceed 64 MiB.
 - Stdin payloads are capped at 64 MiB. Payloads at or above that cap **MUST** return `too_large`.
 
 ## 6. Actions
@@ -231,7 +232,7 @@ Request fields:
 - `path` required
 - `start_line` optional, default `1`
 - `end_line` optional, `0` means no explicit line bound
-- `max_bytes` optional, default `1048576`
+- `max_bytes` optional, default `1048576`, maximum `67108864`
 - `allow_outside_workspace` optional, default `false`
 
 Success fields:
@@ -251,6 +252,7 @@ Rules:
 - Returned `content` **MUST** contain only complete lines.
 - If appending the next selected line would exceed `max_bytes`, the tool **MUST** stop before that line, set `truncated=true`, `has_more=true`, and set `next_start_line` to the first unread line.
 - If the first selected unread line alone exceeds `max_bytes`, the tool **MUST** return `too_large`.
+- Negative values and values above the documented maximum **MUST** return `invalid_request`.
 - `has_more=true` means additional readable content remains.
 - `next_start_line` **MUST** be `0` when `has_more=false`.
 - `file_token` **MUST** be `sha256:<hex>` of the full current raw file bytes after path resolution and before page extraction.
@@ -447,6 +449,7 @@ Rules:
 ### Timeout and process-tree semantics
 
 - Timeout returns `timeout`, `exit_code=-1`, and any partial captured output.
+- `timeout_ms` values above `9223372036854` **MUST** return `invalid_request` rather than overflow the runtime duration.
 - On supported Windows builds, `exec_process_tree_kill` means descendant-tree termination is guaranteed on timeout or cancel via Job Object kill-on-close semantics.
 - If a future non-Windows build cannot provide the same guarantee, it **MUST NOT** advertise `exec_process_tree_kill`.
 

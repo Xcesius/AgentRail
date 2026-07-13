@@ -39,6 +39,18 @@ func TestPatchContextMismatch(t *testing.T) {
 	}
 }
 
+func TestParseRejectsOversizedHunkCountsWithoutPanicking(t *testing.T) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("Parse panicked: %v", recovered)
+		}
+	}()
+	_, err := Parse("--- a/x.txt\n+++ b/x.txt\n@@ -1,9223372036854775806 +1,9223372036854775806 @@\n")
+	if err == nil {
+		t.Fatal("expected oversized hunk counts to fail")
+	}
+}
+
 func TestDeletePatchRequiresTrulyEmptyResult(t *testing.T) {
 	root := t.TempDir()
 	manager, err := workspace.NewManagerFromRoot(root)
@@ -457,6 +469,9 @@ func TestAtomicPatchCommitFailureWithRollbackReportsCommitFailed(t *testing.T) {
 	}
 	if te.Details["repository_state"] != RepositoryStateUnchanged {
 		t.Fatalf("expected unchanged details, got %+v", te.Details)
+	}
+	if len(result.Results) != 2 || result.Results[1].OK || result.Results[1].ErrorCode == "" {
+		t.Fatalf("expected the failed commit result to be preserved, got %+v", result.Results)
 	}
 	oneBytes, _ := os.ReadFile(onePath)
 	twoBytes, _ := os.ReadFile(twoPath)

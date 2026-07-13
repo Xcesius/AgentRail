@@ -39,14 +39,14 @@ func writeFileAtomicInRoot(rootPath, relativePath string, content []byte, create
 
 	perm := fs.FileMode(0o644)
 	if modeOverride != nil {
-		perm = modeOverride.Perm()
+		perm = chmodMode(*modeOverride)
 	}
 	if info, err := root.Stat(relativePath); err == nil {
 		if info.IsDir() {
 			return 0, protocol.Err(protocol.CodeInvalidRequest, "target path is a directory")
 		}
 		if modeOverride == nil {
-			perm = info.Mode().Perm()
+			perm = chmodMode(info.Mode())
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return 0, protocol.Err(protocol.CodeInvalidRequest, "unable to inspect target file")
@@ -142,7 +142,7 @@ func WriteFileAtomic(path string, content []byte, createDirs bool) (int, error) 
 
 	perm := fs.FileMode(0o644)
 	if info, err := os.Stat(path); err == nil {
-		perm = info.Mode().Perm()
+		perm = chmodMode(info.Mode())
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return 0, protocol.Err(protocol.CodeInvalidRequest, "unable to inspect target file")
 	}
@@ -182,6 +182,10 @@ func WriteFileAtomic(path string, content []byte, createDirs bool) (int, error) 
 
 	syncDirBestEffort(dir)
 	return len(content), nil
+}
+
+func chmodMode(mode fs.FileMode) fs.FileMode {
+	return mode.Perm() | mode&(fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky)
 }
 
 func syncDirBestEffort(dir string) {

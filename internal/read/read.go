@@ -3,18 +3,21 @@ package readmod
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 
-	"agentrail/internal/filemeta"
 	"agentrail/internal/protocol"
 	"agentrail/internal/textutil"
 )
 
-const defaultMaxBytes int64 = 1024 * 1024
+const (
+	defaultMaxBytes int64 = 1024 * 1024
+	hardMaxBytes    int64 = 64 * 1024 * 1024
+)
 
 type Options struct {
 	DisplayPath string
@@ -43,8 +46,14 @@ func ReadFile(path string, options Options) (Result, error) {
 	if options.EndLine > 0 && options.EndLine < options.StartLine {
 		return Result{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "end_line must be >= start_line", protocol.ErrorDetails{"field": "end_line", "reason": "before_start_line"})
 	}
-	if options.MaxBytes <= 0 {
+	if options.MaxBytes < 0 {
+		return Result{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "max_bytes must be >= 0", protocol.ErrorDetails{"field": "max_bytes", "reason": "negative"})
+	}
+	if options.MaxBytes == 0 {
 		options.MaxBytes = defaultMaxBytes
+	}
+	if options.MaxBytes > hardMaxBytes {
+		return Result{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "max_bytes exceeds limit", protocol.ErrorDetails{"field": "max_bytes", "reason": "too_large", "limit_bytes": hardMaxBytes})
 	}
 
 	file, err := os.Open(path)
@@ -63,20 +72,21 @@ func ReadFile(path string, options Options) (Result, error) {
 	if info.IsDir() {
 		return Result{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "path is a directory", protocol.ErrorDetails{"field": "path", "reason": "directory"})
 	}
-
-	fileToken, err := filemeta.TokenFromReader(file)
-	if err != nil {
-		return Result{}, protocol.Err(protocol.CodeInvalidRequest, "unable to hash file")
-	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return Result{}, protocol.Err(protocol.CodeInvalidRequest, "unable to seek file")
+	if !info.Mode().IsRegular() {
+		return Result{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "path is not a regular file", protocol.ErrorDetails{"field": "path", "reason": "unsupported_file_type"})
 	}
 
-	reader := bufio.NewReaderSize(file, 64*1024)
-	peek, _ := reader.Peek(4096)
-	if textutil.IsLikelyBinary(peek) {
+	sample := make([]byte, 4096)
+	sampleBytes, sampleErr := file.ReadAt(sample, 0)
+	if sampleErr != nil && !errors.Is(sampleErr, io.EOF) {
+		return Result{}, protocol.Err(protocol.CodeInvalidRequest, "unable to inspect file")
+	}
+	if textutil.IsLikelyBinary(sample[:sampleBytes]) {
 		return Result{}, protocol.ErrDetails(protocol.CodeBinaryFile, "binary file cannot be read", protocol.ErrorDetails{"path": displayPath(path, options.DisplayPath)})
 	}
+
+	hasher := sha256.New()
+	reader := bufio.NewReaderSize(io.TeeReader(file, hasher), 64*1024)
 
 	var out bytes.Buffer
 	lineNo := 0
@@ -86,8 +96,13 @@ func ReadFile(path string, options Options) (Result, error) {
 	nextStartLine := 0
 
 	for {
-		line, readErr := reader.ReadBytes('\n')
-		if len(line) > 0 {
+		retainLimit := int64(0)
+		nextLine := lineNo + 1
+		if nextLine >= options.StartLine && (options.EndLine == 0 || nextLine <= options.EndLine) {
+			retainLimit = options.MaxBytes - int64(out.Len())
+		}
+		line, lineBytes, readErr := readBoundedLine(reader, retainLimit)
+		if lineBytes > 0 {
 			lineNo++
 			if lineNo >= options.StartLine {
 				if options.EndLine > 0 && lineNo > options.EndLine {
@@ -97,9 +112,9 @@ func ReadFile(path string, options Options) (Result, error) {
 				}
 
 				remaining := options.MaxBytes - int64(out.Len())
-				if int64(len(line)) > remaining {
+				if lineBytes > remaining {
 					if out.Len() == 0 {
-						return Result{}, protocol.ErrDetails(protocol.CodeTooLarge, "first selected line exceeds max_bytes", protocol.ErrorDetails{"field": "max_bytes", "limit_bytes": options.MaxBytes, "actual_bytes": len(line)})
+						return Result{}, protocol.ErrDetails(protocol.CodeTooLarge, "first selected line exceeds max_bytes", protocol.ErrorDetails{"field": "max_bytes", "limit_bytes": options.MaxBytes, "actual_bytes": lineBytes})
 					}
 					truncated = true
 					hasMore = true
@@ -117,6 +132,10 @@ func ReadFile(path string, options Options) (Result, error) {
 			return Result{}, protocol.Err(protocol.CodeInvalidRequest, "unable to read file")
 		}
 	}
+	if _, err := io.Copy(io.Discard, reader); err != nil {
+		return Result{}, protocol.Err(protocol.CodeInvalidRequest, "unable to hash file")
+	}
+	fileToken := "sha256:" + hex.EncodeToString(hasher.Sum(nil))
 
 	return Result{
 		Content:       out.String(),
@@ -129,8 +148,29 @@ func ReadFile(path string, options Options) (Result, error) {
 	}, nil
 }
 
+func readBoundedLine(reader *bufio.Reader, retainLimit int64) ([]byte, int64, error) {
+	var line bytes.Buffer
+	var total int64
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		total += int64(len(fragment))
+		if int64(line.Len()) < retainLimit {
+			remaining := retainLimit - int64(line.Len())
+			keep := len(fragment)
+			if int64(keep) > remaining {
+				keep = int(remaining)
+			}
+			_, _ = line.Write(fragment[:keep])
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		return line.Bytes(), total, err
+	}
+}
+
 func displayPath(path, override string) string {
-	if strings.TrimSpace(override) != "" {
+	if override != "" {
 		return override
 	}
 	return filepath.ToSlash(filepath.Clean(path))

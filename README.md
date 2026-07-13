@@ -135,6 +135,8 @@ Read:
 printf '{"action":"read","path":"README.md","start_line":1,"max_bytes":4096}' | agentrail --json
 ```
 
+`read.max_bytes` defaults to 1 MiB and is capped at 64 MiB.
+
 Patch atomically with file tokens:
 
 ```bash

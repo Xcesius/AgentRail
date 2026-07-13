@@ -30,6 +30,7 @@ type Options struct {
 	Limit         int
 	MaxFileBytes  int64
 	Deterministic bool
+	AllowOutside  bool
 }
 
 type Match struct {
@@ -84,6 +85,13 @@ func Search(ctx context.Context, manager *workspace.Manager, options Options) ([
 	}
 
 	paths, err := filesmod.CollectAbsoluteFiles(options.Root, manager)
+	if err != nil {
+		return nil, err
+	}
+	if len(paths) == 0 {
+		return []Match{}, nil
+	}
+	paths, err = resolveSearchPaths(manager, paths, options.AllowOutside)
 	if err != nil {
 		return nil, err
 	}
@@ -199,7 +207,11 @@ queueLoop:
 }
 
 func searchDeterministicWithLimit(ctx context.Context, manager *workspace.Manager, paths []string, options Options, rx *regexp.Regexp) ([]Match, error) {
-	matches := make([]Match, 0, options.Limit)
+	capacity := options.Limit
+	if capacity > 128 {
+		capacity = 128
+	}
+	matches := make([]Match, 0, capacity)
 	for _, path := range paths {
 		if ctx.Err() != nil {
 			return nil, protocol.Err(protocol.CodeSearchError, "search canceled")
@@ -219,6 +231,31 @@ func searchDeterministicWithLimit(ctx context.Context, manager *workspace.Manage
 		}
 	}
 	return matches, nil
+}
+
+func resolveSearchPaths(manager *workspace.Manager, paths []string, allowOutside bool) ([]string, error) {
+	resolvedPaths := make([]string, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		resolved, err := manager.ResolveReadPath(path, allowOutside)
+		if err != nil {
+			return nil, err
+		}
+		info, err := os.Stat(resolved)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		key := resolved
+		if runtime.GOOS == "windows" {
+			key = strings.ToLower(key)
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		resolvedPaths = append(resolvedPaths, resolved)
+	}
+	return resolvedPaths, nil
 }
 
 func scanFile(ctx context.Context, path, rel string, options Options, rx *regexp.Regexp) []Match {

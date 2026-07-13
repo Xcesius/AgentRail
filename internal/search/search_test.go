@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"agentrail/internal/protocol"
 	"agentrail/internal/workspace"
 )
 
@@ -124,5 +125,47 @@ func TestDeterministicLimitUsesDisplayPathOrderingAcrossDirectories(t *testing.T
 	}
 	if len(matches) != 1 || matches[0].Path != "a/z.txt" {
 		t.Fatalf("expected display-path-first match, got %+v", matches)
+	}
+}
+
+func TestSearchHugeLimitDoesNotPanic(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "x.txt"), []byte("needle\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	manager, err := workspace.NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+	limit := int(^uint(0) >> 1)
+	matches, err := Search(context.Background(), manager, Options{Query: "needle", Limit: limit, Deterministic: true})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected one match, got %+v", matches)
+	}
+}
+
+func TestSearchRejectsFileSymlinkEscapeWithoutOptIn(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outside, []byte("external-needle\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "link.txt")); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+	manager, err := workspace.NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+	_, err = Search(context.Background(), manager, Options{Query: "external-needle", Deterministic: true})
+	if err == nil {
+		t.Fatal("expected symlink escape to be rejected")
+	}
+	toolErr, ok := protocol.AsToolError(err)
+	if !ok || toolErr.Code != protocol.CodePathDenied {
+		t.Fatalf("expected path_denied, got %v", err)
 	}
 }

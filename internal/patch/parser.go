@@ -149,9 +149,14 @@ func noFilePatchesError(lines []string) error {
 }
 
 func parsePatchPath(raw string) string {
-	path := strings.TrimSpace(raw)
-	if idx := strings.IndexAny(path, "\t "); idx >= 0 {
+	path := raw
+	if idx := strings.IndexByte(path, '\t'); idx >= 0 {
 		path = path[:idx]
+	}
+	if len(path) >= 2 && path[0] == '"' && path[len(path)-1] == '"' {
+		if unquoted, err := strconv.Unquote(path); err == nil {
+			path = unquoted
+		}
 	}
 	if path == "/dev/null" {
 		return path
@@ -169,15 +174,27 @@ func parseHunk(lines []string, start int) (Hunk, int, error) {
 		return Hunk{}, 0, protocol.Err(protocol.CodePatchFailed, "invalid hunk header")
 	}
 
-	oldStart, _ := strconv.Atoi(matches[1])
+	oldStart, err := strconv.Atoi(matches[1])
+	if err != nil {
+		return Hunk{}, 0, protocol.Err(protocol.CodePatchFailed, "hunk range is out of bounds")
+	}
 	oldLines := 1
 	if matches[2] != "" {
-		oldLines, _ = strconv.Atoi(matches[2])
+		oldLines, err = strconv.Atoi(matches[2])
+		if err != nil {
+			return Hunk{}, 0, protocol.Err(protocol.CodePatchFailed, "hunk range is out of bounds")
+		}
 	}
-	newStart, _ := strconv.Atoi(matches[3])
+	newStart, err := strconv.Atoi(matches[3])
+	if err != nil {
+		return Hunk{}, 0, protocol.Err(protocol.CodePatchFailed, "hunk range is out of bounds")
+	}
 	newLines := 1
 	if matches[4] != "" {
-		newLines, _ = strconv.Atoi(matches[4])
+		newLines, err = strconv.Atoi(matches[4])
+		if err != nil {
+			return Hunk{}, 0, protocol.Err(protocol.CodePatchFailed, "hunk range is out of bounds")
+		}
 	}
 
 	hunk := Hunk{
@@ -185,7 +202,9 @@ func parseHunk(lines []string, start int) (Hunk, int, error) {
 		OldLines: oldLines,
 		NewStart: newStart,
 		NewLines: newLines,
-		Lines:    make([]HunkLine, 0, oldLines+newLines+2),
+		// Capacity is bounded by the actual request rather than caller-provided
+		// counts, which may be extremely large.
+		Lines: make([]HunkLine, 0, len(lines)-start-1),
 	}
 
 	i := start + 1

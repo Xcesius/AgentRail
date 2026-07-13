@@ -2,10 +2,18 @@ package writemod
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestChmodModePreservesSpecialPermissionBits(t *testing.T) {
+	mode := fs.FileMode(0o751) | fs.ModeSetuid | fs.ModeSetgid | fs.ModeSticky
+	if got := chmodMode(mode); got != mode {
+		t.Fatalf("chmodMode=%v want %v", got, mode)
+	}
+}
 
 func TestWriteFileAtomicReplacesExistingFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "file.txt")

@@ -19,7 +19,7 @@ type Manager struct {
 
 func NewManager() (*Manager, error) {
 	root := os.Getenv("CODEX_TOOL_WORKSPACE")
-	if strings.TrimSpace(root) == "" {
+	if root == "" {
 		cwd, err := os.Getwd()
 		if err != nil {
 			return nil, protocol.Err(protocol.CodeWorkspaceRequired, "unable to determine current working directory")
@@ -30,7 +30,7 @@ func NewManager() (*Manager, error) {
 }
 
 func NewManagerFromRoot(root string) (*Manager, error) {
-	if strings.TrimSpace(root) == "" {
+	if root == "" {
 		return nil, protocol.Err(protocol.CodeWorkspaceRequired, "workspace root is required")
 	}
 	absRoot, err := filepath.Abs(root)
@@ -134,7 +134,7 @@ func (m *Manager) ResolveDirPath(input string, allowOutside bool) (string, error
 }
 
 func (m *Manager) ResolveExecCWD(input string) (string, error) {
-	if strings.TrimSpace(input) == "" {
+	if input == "" {
 		return m.Root, nil
 	}
 	resolved, err := m.resolvePath(input)
@@ -222,7 +222,7 @@ func (m *Manager) IsDeniedPath(path string) bool {
 }
 
 func (m *Manager) resolvePath(input string) (string, error) {
-	candidate := strings.TrimSpace(input)
+	candidate := input
 	if candidate == "" {
 		candidate = "."
 	}

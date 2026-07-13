@@ -38,6 +38,20 @@ func TestRunRejectsNegativeTimeout(t *testing.T) {
 	}
 }
 
+func TestRunRejectsTimeoutDurationOverflow(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("64-bit int required")
+	}
+	_, err := Run(Options{Argv: []string{os.Args[0]}, TimeoutMS: int(^uint(0) >> 1)})
+	if err == nil {
+		t.Fatal("expected overflowing timeout to fail")
+	}
+	toolErr, ok := protocol.AsToolError(err)
+	if !ok || toolErr.Code != protocol.CodeInvalidRequest {
+		t.Fatalf("expected invalid_request, got %v", err)
+	}
+}
+
 func TestParseEnvObjectOverridesCaseInsensitivelyOnWindows(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows environment names are case-insensitive")
@@ -196,6 +210,13 @@ func TestParseEnvRejectsRuntimeSymlinkEscape(t *testing.T) {
 	te, ok := protocol.AsToolError(err)
 	if !ok || te.Code != protocol.CodeExecFailed {
 		t.Fatalf("expected exec_failed, got %v", err)
+	}
+	entries, err := os.ReadDir(outside)
+	if err != nil {
+		t.Fatalf("ReadDir(outside): %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("runtime setup wrote outside workspace before rejecting escape: %+v", entries)
 	}
 }
 

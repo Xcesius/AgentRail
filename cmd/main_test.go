@@ -306,6 +306,48 @@ func TestHandleJSONReplaceNoOpReturnsUnchangedRepositoryState(t *testing.T) {
 	}
 }
 
+func TestHandleJSONReplacePreservesSpacesInPath(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "dir"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	manager, err := workspace.NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+
+	resp := handleJSON(manager, false, []byte(`{"action":"replace","path":"dir/my file.txt","content":"created\n"}`))
+	if ok, _ := resp["ok"].(bool); !ok {
+		t.Fatalf("expected success, got %+v", resp)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "dir", "my file.txt"))
+	if err != nil || string(data) != "created\n" {
+		t.Fatalf("intended path was not written: data=%q err=%v", data, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "dir", "my")); !os.IsNotExist(err) {
+		t.Fatalf("truncated path was unexpectedly created: %v", err)
+	}
+}
+
+func TestHandleJSONWritePreservesLeadingSpaceInPath(t *testing.T) {
+	root := t.TempDir()
+	manager, err := workspace.NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+
+	resp := handleJSON(manager, false, []byte(`{"action":"write","path":" leading.txt","content":"value"}`))
+	if ok, _ := resp["ok"].(bool); !ok {
+		t.Fatalf("expected success, got %+v", resp)
+	}
+	if _, err := os.Stat(filepath.Join(root, " leading.txt")); err != nil {
+		t.Fatalf("leading-space path was not written: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "leading.txt")); !os.IsNotExist(err) {
+		t.Fatalf("trimmed path was unexpectedly created: %v", err)
+	}
+}
+
 func TestHandleJSONUsesConsistentCanonicalPathsAcrossActions(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "nested", "sample.txt")
