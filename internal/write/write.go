@@ -95,7 +95,7 @@ func writeFileAtomicWithOpenRoot(root *os.Root, relativePath string, content []b
 	if err := tmp.Close(); err != nil {
 		return 0, protocol.Err(protocol.CodeInvalidRequest, "unable to close temp file")
 	}
-	if err := renameInDirRoot(dirRoot, tmpName, filepath.Base(relativePath)); err != nil {
+	if err := renameInDirRoot(root, dirRoot, tmpName, filepath.Base(relativePath)); err != nil {
 		return 0, protocol.Err(protocol.CodeInvalidRequest, fmt.Sprintf("unable to replace target file: %v", err))
 	}
 	cleanup = false

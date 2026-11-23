@@ -4,7 +4,7 @@ package writemod
 
 import "os"
 
-func renameInDirRoot(dirRoot *os.Root, tmpName, dstName string) error {
+func renameInDirRoot(_ *os.Root, dirRoot *os.Root, tmpName, dstName string) error {
 	return dirRoot.Rename(tmpName, dstName)
 }
 

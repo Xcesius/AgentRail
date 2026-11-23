@@ -105,6 +105,10 @@ func newSearchMatcher(options Options) (*searchMatcher, error) {
 }
 
 func Search(ctx context.Context, manager *workspace.Manager, options Options) ([]Match, error) {
+	return searchWithWorkerCount(ctx, manager, options, 0)
+}
+
+func searchWithWorkerCount(ctx context.Context, manager *workspace.Manager, options Options, workerOverride int) ([]Match, error) {
 	if options.Query == "" {
 		return nil, protocol.ErrDetails(protocol.CodeInvalidRequest, "query is required", protocol.ErrorDetails{"field": "query", "reason": "required"})
 	}
@@ -154,12 +158,15 @@ func Search(ctx context.Context, manager *workspace.Manager, options Options) ([
 		}
 	}
 
-	workerCount := runtime.NumCPU()
-	if workerCount < 2 {
-		workerCount = 2
-	}
-	if workerCount > maxSearchWorkers {
-		workerCount = maxSearchWorkers
+	workerCount := workerOverride
+	if workerCount <= 0 {
+		workerCount = runtime.NumCPU()
+		if workerCount < 2 {
+			workerCount = 2
+		}
+		if workerCount > maxSearchWorkers {
+			workerCount = maxSearchWorkers
+		}
 	}
 	if len(targets) < workerCount {
 		workerCount = len(targets)

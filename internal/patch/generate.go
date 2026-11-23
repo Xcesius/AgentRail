@@ -128,9 +128,20 @@ func buildUnifiedDiff(displayPath, original string, originalExists bool, updated
 		prefix++
 	}
 	suffix := 0
-	for suffix < len(originalLines)-prefix && suffix < len(updatedLines)-prefix &&
-		originalLines[len(originalLines)-1-suffix] == updatedLines[len(updatedLines)-1-suffix] {
-		suffix++
+	if originalTrailingNewline == updatedTrailingNewline {
+		for suffix < len(originalLines)-prefix && suffix < len(updatedLines)-prefix &&
+			originalLines[len(originalLines)-1-suffix] == updatedLines[len(updatedLines)-1-suffix] {
+			suffix++
+		}
+	}
+	if len(originalLines) > 0 && len(updatedLines) > 0 {
+		// If the final line of either side lacks a trailing newline (or the two sides
+		// disagree on trailing newline) and prefix consumed that final line, pull prefix
+		// back by 1 so the line-ending state is represented explicitly in -/+ lines.
+		if (prefix == len(originalLines) && (!originalTrailingNewline || originalTrailingNewline != updatedTrailingNewline)) ||
+			(prefix == len(updatedLines) && (!updatedTrailingNewline || originalTrailingNewline != updatedTrailingNewline)) {
+			prefix--
+		}
 	}
 
 	// If normalized lines are identical (trailing-newline or CRLF/LF-only change),
@@ -154,14 +165,6 @@ func buildUnifiedDiff(displayPath, original string, originalExists bool, updated
 	newEnd := newChangeEnd + contextLines
 	if newEnd > len(updatedLines) {
 		newEnd = len(updatedLines)
-	}
-
-	// If the trailing newline changed and the suffix was trimmed past EOF, include EOF.
-	if originalTrailingNewline != updatedTrailingNewline && (oldEnd < len(originalLines) || newEnd < len(updatedLines)) {
-		oldEnd = len(originalLines)
-		newEnd = len(updatedLines)
-		oldChangeEnd = len(originalLines)
-		newChangeEnd = len(updatedLines)
 	}
 
 	oldCount := oldEnd - ctxStart

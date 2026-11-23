@@ -19,7 +19,7 @@ var (
 
 const errorInvalidHandle = syscall.Errno(6)
 
-func renameInDirRoot(dirRoot *os.Root, tmpName, dstName string) error {
+func renameInDirRoot(root, dirRoot *os.Root, tmpName, dstName string) error {
 	err := dirRoot.Rename(tmpName, dstName)
 	if err == nil {
 		return nil
@@ -30,10 +30,17 @@ func renameInDirRoot(dirRoot *os.Root, tmpName, dstName string) error {
 
 	// Some Windows filesystem minifilters/sandboxes reject NtSetInformationFile
 	// with a RootDirectory handle (ERROR_INVALID_HANDLE). Resolve the canonical
-	// path directly from our already-validated dirRoot handle and use ReplaceFileW
-	// / os.Rename on that verified directory.
+	// paths directly from our already-validated root and dirRoot handles, verify
+	// containment, and use ReplaceFileW / os.Rename on that verified directory.
+	realRoot, rootErr := finalPathForRoot(root)
+	if rootErr != nil {
+		return err
+	}
 	realDir, dirErr := finalPathForRoot(dirRoot)
 	if dirErr != nil {
+		return err
+	}
+	if !isPathWithinWindowsRoot(realDir, realRoot) {
 		return err
 	}
 	if info, statErr := dirRoot.Lstat(dstName); statErr == nil {
@@ -44,6 +51,19 @@ func renameInDirRoot(dirRoot *os.Root, tmpName, dstName string) error {
 		return err
 	}
 	return replaceFile(filepath.Join(realDir, tmpName), filepath.Join(realDir, dstName))
+}
+
+func isPathWithinWindowsRoot(dir, root string) bool {
+	cleanDir := filepath.Clean(dir)
+	cleanRoot := filepath.Clean(root)
+	if strings.EqualFold(cleanDir, cleanRoot) {
+		return true
+	}
+	rootWithSep := cleanRoot
+	if !strings.HasSuffix(rootWithSep, `\`) {
+		rootWithSep += `\`
+	}
+	return len(cleanDir) > len(rootWithSep) && strings.EqualFold(cleanDir[:len(rootWithSep)], rootWithSep)
 }
 
 func finalPathForRoot(dirRoot *os.Root) (string, error) {
