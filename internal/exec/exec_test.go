@@ -95,8 +95,9 @@ func TestRunExecTimeout(t *testing.T) {
 	if te.Details["timeout_ms"] != 50 {
 		t.Fatalf("expected timeout details, got %+v", te.Details)
 	}
-	if te.Details["process_tree_killed"] != true {
-		t.Fatalf("expected process_tree_killed=true, got %+v", te.Details)
+	wantProcessTreeKilled := runtime.GOOS == "windows"
+	if te.Details["process_tree_killed"] != wantProcessTreeKilled {
+		t.Fatalf("expected process_tree_killed=%v, got %+v", wantProcessTreeKilled, te.Details)
 	}
 }
 

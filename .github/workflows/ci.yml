@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 3 * * 1'
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Go version
+        run: go version
+      - name: Vet
+        run: go vet ./...
+      - name: Go modernization check
+        run: go fix -diff ./...
+      - name: Build
+        run: go build ./...
+      - name: Test
+        run: go test -count=1 -v ./...
+      - name: Require Windows containment tests to pass
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $checks = @(
+            @{
+              Pkg = './internal/write'
+              Tests = @(
+                'TestWriteFileAtomicInRootRejectsNTFSJunctionEscape',
+                'TestWriteFileAtomicInRootConcurrentJunctionSwapNeverEscapes',
+                'TestRenameInDirRootFallbackEnforcesRootContainment'
+              )
+            },
+            @{
+              Pkg = './internal/exec'
+              Tests = @(
+                'TestRunExecTimeoutKillsDescendantTree',
+                'TestRunExecTimeoutKillsGrandchildTree',
+                'TestRunExecBlocksBreakawayFromJob',
+                'TestResumeProcessThreadsWin32FallbackWorks'
+              )
+            }
+          )
+          foreach ($check in $checks) {
+            $pattern = '^(' + ($check.Tests -join '|') + ')$'
+            $passed = @()
+            go test -count=1 -json -run $pattern $check.Pkg | ForEach-Object {
+              Write-Host $_
+              $event = $_ | ConvertFrom-Json
+              if ($event.Action -eq 'pass' -and $event.Test) {
+                $passed += $event.Test
+              }
+            }
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            foreach ($test in $check.Tests) {
+              if ($test -notin $passed) {
+                throw "Required test in $($check.Pkg) did not pass (skipped or missing): $test"
+              }
+            }
+          }
+      - name: Race detector
+        env:
+          CGO_ENABLED: '1'
+        run: go test -race -count=1 ./...
+      - name: Benchmarks
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: go test -run='^$' -bench='.' -benchmem -benchtime=2s ./internal/...
+
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - FuzzPatchParse
+          - FuzzBuildAndApplyRoundTrip
+          - FuzzBuildAndApplyCRLF
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Fuzz patch engine
+        shell: bash
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
+          FUZZ_TIME: ${{ github.event_name == 'schedule' && '2m' || '20s' }}
+        run: go test -run='^$' -fuzz="^${FUZZ_TARGET}$" -fuzztime="$FUZZ_TIME" -parallel=2 ./internal/patch

@@ -160,10 +160,7 @@ func searchWithWorkerCount(ctx context.Context, manager *workspace.Manager, opti
 
 	workerCount := workerOverride
 	if workerCount <= 0 {
-		workerCount = max(runtime.NumCPU(), 2)
-		if workerCount > maxSearchWorkers {
-			workerCount = maxSearchWorkers
-		}
+		workerCount = min(max(runtime.NumCPU(), 2), maxSearchWorkers)
 	}
 	if len(targets) < workerCount {
 		workerCount = len(targets)
