@@ -41,18 +41,21 @@ func ListFiles(root string, manager *workspace.Manager) ([]string, error) {
 }
 
 func ListFilesPage(root string, manager *workspace.Manager, limit int, cursor string) (Page, error) {
-	if limit > 0 {
+	if limit < 0 {
+		return Page{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "limit must be >= 0", protocol.ErrorDetails{"field": "limit", "reason": "negative"})
+	}
+	if limit > 0 || cursor != "" {
 		return listFilesBoundedPage(root, manager, limit, cursor)
 	}
 
-	absolutePaths, err := CollectAbsoluteFiles(root, manager)
-	if err != nil {
-		return Page{}, err
-	}
-
-	displayPaths := make([]string, 0, len(absolutePaths))
-	for _, path := range absolutePaths {
+	allowOutside := !manager.IsWithinWorkspace(root)
+	displayPaths := make([]string, 0, 256)
+	err := walkAbsoluteFiles(root, manager, allowOutside, func(path string) error {
 		displayPaths = append(displayPaths, manager.DisplayPath(path))
+		return nil
+	})
+	if err != nil {
+		return Page{}, protocol.Err(protocol.CodeInvalidRequest, "unable to enumerate files")
 	}
 	sort.Strings(displayPaths)
 
@@ -74,13 +77,16 @@ func listFilesBoundedPage(root string, manager *workspace.Manager, limit int, cu
 		after = payload.After
 	}
 
-	pageCapacity := limit + 1
-	if pageCapacity <= 0 || pageCapacity > 1024 {
-		pageCapacity = 1024
+	pageCapacity := 256
+	if limit > 0 {
+		pageCapacity = limit + 1
+		if pageCapacity <= 0 || pageCapacity > 1024 {
+			pageCapacity = 1024
+		}
 	}
 	paths := make([]string, 0, pageCapacity)
-	err := walkSortedFiles(root, manager, func(path string) error {
-		display := manager.DisplayPath(path)
+	allowOutside := !manager.IsWithinWorkspace(root)
+	err := walkSortedFiles(root, manager, allowOutside, after, func(_ string, display string) error {
 		if display == after {
 			anchorFound = true
 			return nil
@@ -89,7 +95,7 @@ func listFilesBoundedPage(root string, manager *workspace.Manager, limit int, cu
 			return nil
 		}
 		paths = append(paths, display)
-		if len(paths) > limit {
+		if limit > 0 && len(paths) > limit {
 			return errPageComplete
 		}
 		return nil
@@ -101,7 +107,8 @@ func listFilesBoundedPage(root string, manager *workspace.Manager, limit int, cu
 		return Page{}, protocol.ErrDetails(protocol.CodeCursorStale, "cursor anchor is no longer present", protocol.ErrorDetails{"field": "cursor", "reason": "stale_anchor"})
 	}
 
-	page := Page{Paths: paths, HasMore: len(paths) > limit}
+	hasMore := limit > 0 && len(paths) > limit
+	page := Page{Paths: paths, HasMore: hasMore}
 	if page.HasMore {
 		page.Paths = page.Paths[:limit]
 		nextCursor, err := encodeCursor(rootIdentity, page.Paths[len(page.Paths)-1])
@@ -113,46 +120,80 @@ func listFilesBoundedPage(root string, manager *workspace.Manager, limit int, cu
 	return page, nil
 }
 
-func walkSortedFiles(root string, manager *workspace.Manager, visit func(string) error) error {
+func walkSortedFiles(root string, manager *workspace.Manager, allowOutside bool, after string, visit func(path, display string) error) error {
 	frontier := &pathEntryHeap{}
 	heap.Init(frontier)
-	if err := pushDirectoryEntries(frontier, root, manager); err != nil {
+	if err := pushDirectoryEntries(frontier, root, manager, allowOutside, after); err != nil {
 		return err
 	}
 	for frontier.Len() > 0 {
 		entry := heap.Pop(frontier).(pathEntry)
 		if entry.isDir {
-			if manager.ShouldSkipDir(entry.path) {
-				continue
-			}
-			if err := pushDirectoryEntries(frontier, entry.path, manager); err != nil {
+			if err := pushDirectoryEntries(frontier, entry.path, manager, allowOutside, after); err != nil {
 				return err
 			}
 			continue
 		}
-		if manager.IsDeniedPath(entry.path) {
-			continue
-		}
-		if err := visit(entry.path); err != nil {
+		if err := visit(entry.path, entry.display); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func pushDirectoryEntries(frontier *pathEntryHeap, dir string, manager *workspace.Manager) error {
+func canPruneDirectory(dirDisplay, after string) bool {
+	if after == "" {
+		return false
+	}
+	prefix := dirDisplay + "/"
+	return !strings.HasPrefix(after, prefix) && prefix < after
+}
+
+func pushDirectoryEntries(frontier *pathEntryHeap, dir string, manager *workspace.Manager, allowOutside bool, after string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return err
 	}
 	for _, entry := range entries {
 		path := filepath.Clean(filepath.Join(dir, entry.Name()))
-		if entry.IsDir() && manager.ShouldSkipDir(path) {
+		if entry.IsDir() {
+			if manager.ShouldSkipDir(path) {
+				continue
+			}
+			display := manager.DisplayPath(path)
+			if canPruneDirectory(display, after) {
+				continue
+			}
+			heap.Push(frontier, pathEntry{path: path, display: display, isDir: true})
 			continue
 		}
-		heap.Push(frontier, pathEntry{path: path, display: manager.DisplayPath(path), isDir: entry.IsDir()})
+		if manager.IsDeniedPath(path) {
+			continue
+		}
+		if entry.Type()&fs.ModeSymlink != 0 {
+			if !isAllowedSymlinkFile(path, manager, allowOutside) {
+				continue
+			}
+		}
+		display := manager.DisplayPath(path)
+		if after != "" && display < after {
+			continue
+		}
+		heap.Push(frontier, pathEntry{path: path, display: display, isDir: false})
 	}
 	return nil
+}
+
+func isAllowedSymlinkFile(path string, manager *workspace.Manager, allowOutside bool) bool {
+	resolved, err := manager.ResolveReadPath(path, allowOutside)
+	if err != nil {
+		return false
+	}
+	info, err := os.Stat(resolved)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	return true
 }
 
 type pathEntry struct {
@@ -176,7 +217,8 @@ func (h *pathEntryHeap) Pop() any {
 
 func CollectAbsoluteFiles(root string, manager *workspace.Manager) ([]string, error) {
 	files := make([]string, 0, 256)
-	err := walkAbsoluteFiles(root, manager, func(path string) error {
+	allowOutside := !manager.IsWithinWorkspace(root)
+	err := walkAbsoluteFiles(root, manager, allowOutside, func(path string) error {
 		files = append(files, filepath.Clean(path))
 		return nil
 	})
@@ -187,7 +229,7 @@ func CollectAbsoluteFiles(root string, manager *workspace.Manager) ([]string, er
 	return files, nil
 }
 
-func walkAbsoluteFiles(root string, manager *workspace.Manager, visit func(string) error) error {
+func walkAbsoluteFiles(root string, manager *workspace.Manager, allowOutside bool, visit func(string) error) error {
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -200,6 +242,12 @@ func walkAbsoluteFiles(root string, manager *workspace.Manager, visit func(strin
 		}
 		if manager.IsDeniedPath(path) {
 			return nil
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			// Skip directory symlinks here; callers like search still inspect file symlinks via ResolveReadPath.
+			if info, err := os.Stat(path); err == nil && info.IsDir() {
+				return nil
+			}
 		}
 		return visit(filepath.Clean(path))
 	})

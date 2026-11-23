@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"agentrail/internal/protocol"
 )
@@ -20,13 +21,20 @@ func WriteFileAtomicInRootWithMode(rootPath, relativePath string, content []byte
 	return writeFileAtomicInRoot(rootPath, relativePath, content, createDirs, &mode)
 }
 
+func WriteFileAtomicWithRoot(root *os.Root, relativePath string, content []byte, createDirs bool, modeOverride *fs.FileMode) (int, error) {
+	return writeFileAtomicWithOpenRoot(root, relativePath, content, createDirs, modeOverride)
+}
+
 func writeFileAtomicInRoot(rootPath, relativePath string, content []byte, createDirs bool, modeOverride *fs.FileMode) (int, error) {
 	root, err := os.OpenRoot(rootPath)
 	if err != nil {
 		return 0, protocol.Err(protocol.CodeInvalidRequest, "unable to open workspace root")
 	}
 	defer root.Close()
+	return writeFileAtomicWithOpenRoot(root, relativePath, content, createDirs, modeOverride)
+}
 
+func writeFileAtomicWithOpenRoot(root *os.Root, relativePath string, content []byte, createDirs bool, modeOverride *fs.FileMode) (int, error) {
 	relativePath = filepath.Clean(filepath.FromSlash(relativePath))
 	dir := filepath.Dir(relativePath)
 	if createDirs {
@@ -34,18 +42,18 @@ func writeFileAtomicInRoot(rootPath, relativePath string, content []byte, create
 			return 0, protocol.Err(protocol.CodeInvalidRequest, "unable to create parent directory")
 		}
 	} else if info, err := root.Stat(dir); err != nil || !info.IsDir() {
-		return 0, protocol.Err(protocol.CodeNotFound, "parent directory not found")
+		return 0, protocol.ErrDetails(protocol.CodeNotFound, "parent directory not found", protocol.ErrorDetails{"path": filepath.ToSlash(dir), "kind": "directory"})
 	}
 
 	perm := fs.FileMode(0o644)
 	if modeOverride != nil {
 		perm = chmodMode(*modeOverride)
 	}
-	if info, err := root.Stat(relativePath); err == nil {
+	if info, err := root.Lstat(relativePath); err == nil {
 		if info.IsDir() {
-			return 0, protocol.Err(protocol.CodeInvalidRequest, "target path is a directory")
+			return 0, protocol.ErrDetails(protocol.CodeInvalidRequest, "target path is a directory", protocol.ErrorDetails{"field": "path", "reason": "directory"})
 		}
-		if modeOverride == nil {
+		if modeOverride == nil && info.Mode()&fs.ModeSymlink == 0 {
 			perm = chmodMode(info.Mode())
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -65,6 +73,9 @@ func writeFileAtomicInRoot(rootPath, relativePath string, content []byte, create
 	cleanup := true
 	defer func() {
 		if cleanup {
+			if runtime.GOOS == "windows" {
+				_ = dirRoot.Chmod(tmpName, 0o600)
+			}
 			_ = dirRoot.Remove(tmpName)
 		}
 	}()
@@ -84,7 +95,7 @@ func writeFileAtomicInRoot(rootPath, relativePath string, content []byte, create
 	if err := tmp.Close(); err != nil {
 		return 0, protocol.Err(protocol.CodeInvalidRequest, "unable to close temp file")
 	}
-	if err := dirRoot.Rename(tmpName, filepath.Base(relativePath)); err != nil {
+	if err := renameInDirRoot(dirRoot, tmpName, filepath.Base(relativePath)); err != nil {
 		return 0, protocol.Err(protocol.CodeInvalidRequest, fmt.Sprintf("unable to replace target file: %v", err))
 	}
 	cleanup = false
@@ -120,6 +131,9 @@ func createRootTemp(root *os.Root) (*os.File, string, error) {
 }
 
 func syncRootBestEffort(root *os.Root) {
+	if runtime.GOOS == "windows" {
+		return
+	}
 	h, err := root.Open(".")
 	if err != nil {
 		return
@@ -136,13 +150,18 @@ func WriteFileAtomic(path string, content []byte, createDirs bool) (int, error) 
 		}
 	} else {
 		if info, err := os.Stat(dir); err != nil || !info.IsDir() {
-			return 0, protocol.Err(protocol.CodeNotFound, "parent directory not found")
+			return 0, protocol.ErrDetails(protocol.CodeNotFound, "parent directory not found", protocol.ErrorDetails{"path": filepath.ToSlash(dir), "kind": "directory"})
 		}
 	}
 
 	perm := fs.FileMode(0o644)
-	if info, err := os.Stat(path); err == nil {
-		perm = chmodMode(info.Mode())
+	if info, err := os.Lstat(path); err == nil {
+		if info.IsDir() {
+			return 0, protocol.ErrDetails(protocol.CodeInvalidRequest, "target path is a directory", protocol.ErrorDetails{"field": "path", "reason": "directory"})
+		}
+		if info.Mode()&fs.ModeSymlink == 0 {
+			perm = chmodMode(info.Mode())
+		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return 0, protocol.Err(protocol.CodeInvalidRequest, "unable to inspect target file")
 	}
@@ -155,6 +174,9 @@ func WriteFileAtomic(path string, content []byte, createDirs bool) (int, error) 
 	cleanup := true
 	defer func() {
 		if cleanup {
+			if runtime.GOOS == "windows" {
+				_ = os.Chmod(tmpPath, 0o600)
+			}
 			_ = os.Remove(tmpPath)
 		}
 	}()
@@ -189,6 +211,9 @@ func chmodMode(mode fs.FileMode) fs.FileMode {
 }
 
 func syncDirBestEffort(dir string) {
+	if runtime.GOOS == "windows" {
+		return
+	}
 	h, err := os.Open(dir)
 	if err != nil {
 		return

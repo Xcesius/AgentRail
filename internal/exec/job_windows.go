@@ -4,6 +4,7 @@ package execmod
 
 import (
 	"fmt"
+	osexec "os/exec"
 	"syscall"
 	"unsafe"
 )
@@ -13,7 +14,9 @@ const (
 	jobObjectLimitKillOnJobClose           = 0x00002000
 	processSetQuota                        = 0x0100
 	processTerminate                       = 0x0001
+	processSuspendResume                   = 0x0800
 	processQueryLimitedInformation         = 0x1000
+	createSuspended                        = 0x00000004
 )
 
 var (
@@ -23,6 +26,9 @@ var (
 	procAssignProcessToJobObject = kernel32Proc.NewProc("AssignProcessToJobObject")
 	procOpenProcess              = kernel32Proc.NewProc("OpenProcess")
 	procCloseHandle              = kernel32Proc.NewProc("CloseHandle")
+
+	ntdllProc           = syscall.NewLazyDLL("ntdll.dll")
+	procNtResumeProcess = ntdllProc.NewProc("NtResumeProcess")
 )
 
 type jobObject struct {
@@ -59,6 +65,13 @@ type jobObjectExtendedLimitInformation struct {
 	PeakJobMemoryUsed     uintptr
 }
 
+func prepareCommandForJob(cmd *osexec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.CreationFlags |= createSuspended
+}
+
 func newJobObject() (*jobObject, error) {
 	r1, _, callErr := procCreateJobObjectW.Call(0, 0)
 	if r1 == 0 {
@@ -80,7 +93,7 @@ func newJobObject() (*jobObject, error) {
 	return job, nil
 }
 
-func (j *jobObject) Assign(pid int) error {
+func (j *jobObject) AssignAndResume(pid int) error {
 	if j == nil || j.handle == 0 {
 		return nil
 	}
@@ -93,6 +106,10 @@ func (j *jobObject) Assign(pid int) error {
 	r1, _, callErr := procAssignProcessToJobObject.Call(uintptr(j.handle), uintptr(processHandle))
 	if r1 == 0 {
 		return fmt.Errorf("AssignProcessToJobObject: %v", callErr)
+	}
+	status, _, _ := procNtResumeProcess.Call(uintptr(processHandle))
+	if status != 0 {
+		return fmt.Errorf("NtResumeProcess: status=0x%x", status)
 	}
 	return nil
 }
@@ -112,7 +129,7 @@ func (j *jobObject) CloseAndKill() error {
 
 func openProcessForJob(pid int) (syscall.Handle, error) {
 	r1, _, callErr := procOpenProcess.Call(
-		uintptr(processSetQuota|processTerminate|processQueryLimitedInformation),
+		uintptr(processSetQuota|processTerminate|processSuspendResume|processQueryLimitedInformation),
 		uintptr(0),
 		uintptr(uint32(pid)),
 	)

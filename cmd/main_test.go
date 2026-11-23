@@ -389,3 +389,21 @@ func TestHandleJSONUsesConsistentCanonicalPathsAcrossActions(t *testing.T) {
 		t.Fatalf("unexpected patch results: %+v", patchResp)
 	}
 }
+
+func TestHandleJSONReplaceFailureReportsChangedFalse(t *testing.T) {
+	root := t.TempDir()
+	manager, err := workspace.NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+	resp := handleJSON(manager, false, []byte(`{"action":"replace","path":"missing-dir/file.txt","content":"hello\n","create_dirs":false}`))
+	if ok, _ := resp["ok"].(bool); ok {
+		t.Fatalf("expected failure when create_dirs=false and parent dir missing, got %+v", resp)
+	}
+	if changed, _ := resp["changed"].(bool); changed {
+		t.Fatalf("expected changed=false on failed replace, got %+v", resp)
+	}
+	if state, _ := resp["repository_state"].(string); state != patchmod.RepositoryStateUnchanged {
+		t.Fatalf("expected unchanged repository_state, got %+v", resp)
+	}
+}

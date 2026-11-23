@@ -1,6 +1,9 @@
 package textutil
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestIsLikelyBinaryAcceptsASCIIText(t *testing.T) {
 	if IsLikelyBinary([]byte("hello\nworld\n")) {
@@ -11,6 +14,21 @@ func TestIsLikelyBinaryAcceptsASCIIText(t *testing.T) {
 func TestIsLikelyBinaryAcceptsUTF8Text(t *testing.T) {
 	if IsLikelyBinary([]byte("Grüße 世界\n")) {
 		t.Fatalf("expected UTF-8 text to be accepted")
+	}
+}
+
+func TestIsLikelyBinaryAcceptsTruncatedMultiByteUTF8Sample(t *testing.T) {
+	// 2000 3-byte CJK runes sliced at 4096 bytes splits a rune at byte 4095.
+	cjk := []byte(strings.Repeat("中", 2000))
+	if IsLikelyBinary(cjk[:4096]) {
+		t.Fatalf("expected valid UTF-8 CJK sample truncated at 4096 bytes to be accepted")
+	}
+	// Also test 2-byte, 3-byte (2 bytes left), and 4-byte emoji (1, 2, 3 bytes left).
+	emoji := []byte(strings.Repeat("🚀", 1200))
+	for _, cut := range []int{4093, 4094, 4095, 4096} {
+		if IsLikelyBinary(emoji[:cut]) {
+			t.Fatalf("expected valid UTF-8 emoji sample truncated at %d bytes to be accepted", cut)
+		}
 	}
 }
 

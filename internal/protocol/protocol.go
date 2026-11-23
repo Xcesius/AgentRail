@@ -14,23 +14,37 @@ const ProtocolVersion = 1
 
 var ToolVersion = "0.0.0-dev+0000000"
 
-var baseCapabilities = []string{
-	"build_patch",
-	"exec",
-	"exec_workspace_env",
-	"exec_output_budget",
-	"files",
-	"files_pagination",
-	"patch",
-	"patch_atomic",
-	"patch_expected_file_tokens",
-	"read",
-	"read_file_token",
-	"replace",
-	"schema",
-	"search",
-	"write",
-}
+var (
+	baseCapabilities = []string{
+		"build_patch",
+		"exec",
+		"exec_workspace_env",
+		"exec_output_budget",
+		"files",
+		"files_pagination",
+		"patch",
+		"patch_atomic",
+		"patch_expected_file_tokens",
+		"read",
+		"read_file_token",
+		"replace",
+		"schema",
+		"search",
+		"write",
+	}
+	cachedCapabilities []string
+	actionAllowedKeys  = map[string]map[string]struct{}{
+		"schema":      {"action": {}, "request_id": {}, "target": {}},
+		"files":       {"action": {}, "request_id": {}, "path": {}, "allow_outside_workspace": {}, "limit": {}, "cursor": {}},
+		"search":      {"action": {}, "request_id": {}, "query": {}, "path": {}, "case_sensitive": {}, "regex": {}, "glob": {}, "limit": {}, "max_file_bytes": {}, "deterministic": {}, "allow_outside_workspace": {}},
+		"read":        {"action": {}, "request_id": {}, "path": {}, "start_line": {}, "end_line": {}, "max_bytes": {}, "allow_outside_workspace": {}},
+		"write":       {"action": {}, "request_id": {}, "path": {}, "content": {}, "create_dirs": {}},
+		"patch":       {"action": {}, "request_id": {}, "diff": {}, "atomic": {}, "expected_file_tokens": {}},
+		"build_patch": {"action": {}, "request_id": {}, "path": {}, "content": {}, "expected_file_token": {}},
+		"replace":     {"action": {}, "request_id": {}, "path": {}, "content": {}, "expected_file_token": {}, "create_dirs": {}},
+		"exec":        {"action": {}, "request_id": {}, "argv": {}, "cwd": {}, "env": {}, "timeout_ms": {}, "max_output_bytes": {}},
+	}
+)
 
 type Request struct {
 	RequestID             string            `json:"request_id,omitempty"`
@@ -81,7 +95,32 @@ func ParseRequest(data []byte) (Request, error) {
 	if strings.TrimSpace(req.Action) == "" {
 		return Request{}, ErrDetails(CodeInvalidRequest, "action is required", ErrorDetails{"field": "action", "reason": "required"})
 	}
+	if err := validateActionFields(strings.ToLower(strings.TrimSpace(req.Action)), data); err != nil {
+		return Request{}, err
+	}
 	return req, nil
+}
+
+func validateActionFields(action string, data []byte) error {
+	allowed, knownAction := actionAllowedKeys[action]
+	if !knownAction {
+		return nil
+	}
+	var rawFields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rawFields); err != nil {
+		return nil
+	}
+	var badKeys []string
+	for key := range rawFields {
+		if _, ok := allowed[key]; !ok {
+			badKeys = append(badKeys, key)
+		}
+	}
+	if len(badKeys) > 0 {
+		sort.Strings(badKeys)
+		return ErrDetails(CodeInvalidRequest, "invalid JSON request", ErrorDetails{"field": badKeys[0], "reason": "unknown_field"})
+	}
+	return nil
 }
 
 func Success(action string, fields map[string]any) map[string]any {
@@ -127,12 +166,8 @@ func GetErrorPayload(err error, fallbackCode string) ErrorPayload {
 }
 
 func Capabilities() []string {
-	out := make([]string, 0, len(baseCapabilities)+1)
-	out = append(out, baseCapabilities...)
-	if runtime.GOOS == "windows" {
-		out = append(out, "exec_process_tree_kill")
-	}
-	sort.Strings(out)
+	out := make([]string, len(cachedCapabilities))
+	copy(out, cachedCapabilities)
 	return out
 }
 
@@ -242,4 +277,10 @@ func requestFieldName(field string) string {
 
 func init() {
 	sort.Strings(baseCapabilities)
+	cachedCapabilities = make([]string, 0, len(baseCapabilities)+1)
+	cachedCapabilities = append(cachedCapabilities, baseCapabilities...)
+	if runtime.GOOS == "windows" {
+		cachedCapabilities = append(cachedCapabilities, "exec_process_tree_kill")
+	}
+	sort.Strings(cachedCapabilities)
 }

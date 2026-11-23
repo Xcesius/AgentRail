@@ -164,3 +164,42 @@ func TestBuildFilePatchSupportsTrailingNewlineChanges(t *testing.T) {
 		t.Fatalf("expected trailing newline to be removed, got %q", string(updated))
 	}
 }
+
+func TestBuildFilePatchGeneratesCompactHunkForLargeFile(t *testing.T) {
+	root := t.TempDir()
+	manager, err := workspace.NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+
+	var orig, want strings.Builder
+	for i := 1; i <= 500; i++ {
+		if i == 250 {
+			orig.WriteString("-- old comment\n")
+			want.WriteString("-- new comment\n")
+		} else {
+			orig.WriteString("unchanged line\n")
+			want.WriteString("unchanged line\n")
+		}
+	}
+	path := filepath.Join(root, "large.sql")
+	if err := os.WriteFile(path, []byte(orig.String()), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	generated, err := BuildFilePatch(manager, "large.sql", want.String(), "")
+	if err != nil {
+		t.Fatalf("BuildFilePatch: %v", err)
+	}
+	diffLines := strings.Split(strings.TrimSuffix(generated.Diff, "\n"), "\n")
+	if len(diffLines) > 20 {
+		t.Fatalf("expected compact diff for single-line edit, got %d lines", len(diffLines))
+	}
+	if _, err := Apply(manager, generated.Diff, Options{Atomic: true}); err != nil {
+		t.Fatalf("Apply generated compact diff: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != want.String() {
+		t.Fatalf("applied compact diff mismatch: err=%v len(got)=%d len(want)=%d", err, len(got), len(want.String()))
+	}
+}

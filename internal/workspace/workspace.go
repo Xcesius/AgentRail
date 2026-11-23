@@ -15,6 +15,9 @@ type Manager struct {
 	Root              string
 	WarnSystemRoot    bool
 	systemDirectories []string
+	rootWithSep       string
+	rootLower         string
+	rootWithSepLower  string
 }
 
 func NewManager() (*Manager, error) {
@@ -52,9 +55,19 @@ func NewManagerFromRoot(root string) (*Manager, error) {
 		return nil, protocol.Err(protocol.CodeWorkspaceRequired, "workspace root must be a directory")
 	}
 
+	cleanRoot := filepath.Clean(canonicalRoot)
+	rootWithSep := cleanRoot
+	if !strings.HasSuffix(rootWithSep, string(os.PathSeparator)) {
+		rootWithSep += string(os.PathSeparator)
+	}
 	manager := &Manager{
-		Root:              filepath.Clean(canonicalRoot),
-		systemDirectories: systemDirsForPath(canonicalRoot),
+		Root:              cleanRoot,
+		systemDirectories: systemDirsForPath(cleanRoot),
+		rootWithSep:       rootWithSep,
+	}
+	if runtime.GOOS == "windows" {
+		manager.rootLower = strings.ToLower(cleanRoot)
+		manager.rootWithSepLower = strings.ToLower(rootWithSep)
 	}
 	for _, sys := range manager.systemDirectories {
 		if equalPath(manager.Root, sys) {
@@ -144,8 +157,11 @@ func (m *Manager) ResolveExecCWD(input string) (string, error) {
 	if !m.IsWithinWorkspace(resolved) {
 		return "", protocol.ErrDetails(protocol.CodePathDenied, "exec cwd outside workspace is not allowed", protocol.ErrorDetails{"path": m.DisplayPath(resolved), "policy": "workspace_only"})
 	}
-	if m.IsDeniedPath(resolved) || m.isSystemDenied(resolved) {
+	if m.IsDeniedPath(resolved) {
 		return "", protocol.ErrDetails(protocol.CodePathDenied, "path is denied", protocol.ErrorDetails{"path": m.DisplayPath(resolved), "policy": "deny_rule"})
+	}
+	if m.isSystemDenied(resolved) {
+		return "", protocol.ErrDetails(protocol.CodePathDenied, "path is denied", protocol.ErrorDetails{"path": m.DisplayPath(resolved), "policy": "system_directory"})
 	}
 	info, err := os.Stat(resolved)
 	if err != nil {
@@ -161,39 +177,58 @@ func (m *Manager) ResolveExecCWD(input string) (string, error) {
 }
 
 func (m *Manager) IsWithinWorkspace(path string) bool {
-	path = filepath.Clean(path)
-	root := filepath.Clean(m.Root)
-
-	if equalPath(path, root) {
-		return true
-	}
-
-	rel, err := filepath.Rel(root, path)
-	if err != nil {
-		return false
-	}
-	rel = filepath.Clean(rel)
-	if rel == "." {
-		return true
-	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return false
-	}
-	return true
+	_, within := m.relativeIfWithin(filepath.Clean(path))
+	return within
 }
 
 func (m *Manager) DisplayPath(path string) string {
-	path = filepath.Clean(path)
-	if m.IsWithinWorkspace(path) {
-		rel, err := filepath.Rel(m.Root, path)
-		if err == nil {
-			if rel == "." {
-				return "."
+	clean := filepath.Clean(path)
+	if rel, within := m.relativeIfWithin(clean); within {
+		if rel == "" || rel == "." {
+			return "."
+		}
+		return filepath.ToSlash(rel)
+	}
+	return canonicalAbsoluteDisplay(clean)
+}
+
+func (m *Manager) relativeIfWithin(cleanPath string) (string, bool) {
+	if runtime.GOOS == "windows" {
+		rootLower := m.rootLower
+		rootWithSepLower := m.rootWithSepLower
+		if rootLower == "" {
+			cleanRoot := filepath.Clean(m.Root)
+			rootLower = strings.ToLower(cleanRoot)
+			rootWithSepLower = rootLower
+			if !strings.HasSuffix(rootWithSepLower, string(os.PathSeparator)) {
+				rootWithSepLower += string(os.PathSeparator)
 			}
-			return filepath.ToSlash(rel)
+		}
+		if len(cleanPath) == len(rootLower) && strings.EqualFold(cleanPath, rootLower) {
+			return ".", true
+		}
+		if len(cleanPath) > len(rootWithSepLower) && strings.EqualFold(cleanPath[:len(rootWithSepLower)], rootWithSepLower) {
+			return cleanPath[len(rootWithSepLower):], true
+		}
+		return "", false
+	}
+
+	root := m.Root
+	rootWithSep := m.rootWithSep
+	if rootWithSep == "" {
+		root = filepath.Clean(root)
+		rootWithSep = root
+		if !strings.HasSuffix(rootWithSep, string(os.PathSeparator)) {
+			rootWithSep += string(os.PathSeparator)
 		}
 	}
-	return canonicalAbsoluteDisplay(path)
+	if cleanPath == root {
+		return ".", true
+	}
+	if strings.HasPrefix(cleanPath, rootWithSep) {
+		return cleanPath[len(rootWithSep):], true
+	}
+	return "", false
 }
 
 func (m *Manager) RelativePath(path string) string {
@@ -212,19 +247,55 @@ func (m *Manager) ShouldSkipDir(path string) bool {
 }
 
 func (m *Manager) IsDeniedPath(path string) bool {
-	parts := strings.Split(filepath.ToSlash(filepath.Clean(path)), "/")
-	for _, part := range parts {
-		if strings.EqualFold(part, ".agentrail") || strings.EqualFold(part, ".git") || strings.EqualFold(part, "node_modules") {
-			return true
+	clean := filepath.Clean(path)
+	target := clean
+	if rel, within := m.relativeIfWithin(clean); within {
+		if rel == "." || rel == "" {
+			return false
+		}
+		target = rel
+	}
+	return hasDeniedSegment(target)
+}
+
+func hasDeniedSegment(path string) bool {
+	start := 0
+	for i := 0; i <= len(path); i++ {
+		if i == len(path) || path[i] == '/' || path[i] == '\\' {
+			part := path[start:i]
+			if isDeniedSegment(part) {
+				return true
+			}
+			start = i + 1
 		}
 	}
 	return false
+}
+
+func isDeniedSegment(part string) bool {
+	switch len(part) {
+	case 4:
+		return strings.EqualFold(part, ".git")
+	case 10:
+		return strings.EqualFold(part, ".agentrail")
+	case 12:
+		return strings.EqualFold(part, "node_modules")
+	default:
+		return false
+	}
 }
 
 func (m *Manager) resolvePath(input string) (string, error) {
 	candidate := input
 	if candidate == "" {
 		candidate = "."
+	}
+	if runtime.GOOS == "windows" {
+		normalized, err := normalizeWindowsPrefix(candidate)
+		if err != nil {
+			return "", err
+		}
+		candidate = normalized
 	}
 	if vol := filepath.VolumeName(candidate); vol != "" && !filepath.IsAbs(candidate) {
 		return "", protocol.ErrDetails(protocol.CodePathDenied, "volume-relative paths are not allowed", protocol.ErrorDetails{"path": filepath.ToSlash(candidate), "policy": "volume_relative"})
@@ -241,15 +312,42 @@ func (m *Manager) resolvePath(input string) (string, error) {
 	if err != nil {
 		return "", protocol.Err(protocol.CodeInvalidRequest, "unable to canonicalize path")
 	}
+	if runtime.GOOS == "windows" {
+		normalized, normErr := normalizeWindowsPrefix(resolved)
+		if normErr != nil {
+			return "", normErr
+		}
+		resolved = normalized
+	}
 	return resolved, nil
+}
+
+func normalizeWindowsPrefix(candidate string) (string, error) {
+	// Normalize leading slashes so both \\?\ and //?/ are caught.
+	slashNorm := strings.ReplaceAll(candidate, "/", `\`)
+	switch {
+	case strings.HasPrefix(slashNorm, `\\.\`), strings.HasPrefix(slashNorm, `\??\`):
+		return "", protocol.ErrDetails(protocol.CodePathDenied, "Windows device paths are not allowed", protocol.ErrorDetails{"path": filepath.ToSlash(candidate), "policy": "device_path"})
+	case strings.HasPrefix(slashNorm, `\\?\`):
+		rest := slashNorm[4:]
+		if len(rest) >= 3 && isASCIIAlpha(rest[0]) && rest[1] == ':' && rest[2] == '\\' {
+			return rest, nil
+		}
+		if len(rest) == 2 && isASCIIAlpha(rest[0]) && rest[1] == ':' {
+			return rest + `\`, nil
+		}
+		return "", protocol.ErrDetails(protocol.CodePathDenied, "Windows device paths are not allowed", protocol.ErrorDetails{"path": filepath.ToSlash(candidate), "policy": "device_path"})
+	}
+	return candidate, nil
+}
+
+func isASCIIAlpha(b byte) bool {
+	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z')
 }
 
 func (m *Manager) isSystemDenied(path string) bool {
 	for _, sys := range m.systemDirectories {
 		if isWithin(path, sys) {
-			if m.IsWithinWorkspace(path) {
-				return false
-			}
 			if equalPath(m.Root, sys) {
 				return false
 			}
@@ -290,12 +388,13 @@ func canonicalizePath(path string) (string, error) {
 }
 
 func splitExistingPrefix(path string) (string, []string, error) {
-	remainder := []string{}
+	remainder := make([]string, 0, 8)
 	cursor := filepath.Clean(path)
 
 	for {
 		_, err := os.Lstat(cursor)
 		if err == nil {
+			reverseStrings(remainder)
 			return cursor, remainder, nil
 		}
 		if !errors.Is(err, os.ErrNotExist) {
@@ -303,10 +402,17 @@ func splitExistingPrefix(path string) (string, []string, error) {
 		}
 		parent := filepath.Dir(cursor)
 		if parent == cursor {
+			reverseStrings(remainder)
 			return cursor, remainder, nil
 		}
-		remainder = append([]string{filepath.Base(cursor)}, remainder...)
+		remainder = append(remainder, filepath.Base(cursor))
 		cursor = parent
+	}
+}
+
+func reverseStrings(items []string) {
+	for i, j := 0, len(items)-1; i < j; i, j = i+1, j-1 {
+		items[i], items[j] = items[j], items[i]
 	}
 }
 
@@ -329,14 +435,19 @@ func systemDirsForPath(path string) []string {
 		drives = append(drives, filepath.VolumeName(systemRoot))
 	}
 	for _, drive := range drives {
+		drive = strings.TrimSpace(drive)
 		if drive == "" {
 			continue
 		}
+		driveRoot := drive
+		if !strings.HasSuffix(driveRoot, string(os.PathSeparator)) {
+			driveRoot += string(os.PathSeparator)
+		}
 		candidates = append(candidates,
-			filepath.Join(drive, "Windows"),
-			filepath.Join(drive, "Program Files"),
-			filepath.Join(drive, "Program Files (x86)"),
-			filepath.Join(drive, "ProgramData"),
+			filepath.Join(driveRoot, "Windows"),
+			filepath.Join(driveRoot, "Program Files"),
+			filepath.Join(driveRoot, "Program Files (x86)"),
+			filepath.Join(driveRoot, "ProgramData"),
 		)
 	}
 

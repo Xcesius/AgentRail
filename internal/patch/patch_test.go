@@ -473,6 +473,9 @@ func TestAtomicPatchCommitFailureWithRollbackReportsCommitFailed(t *testing.T) {
 	if len(result.Results) != 2 || result.Results[1].OK || result.Results[1].ErrorCode == "" {
 		t.Fatalf("expected the failed commit result to be preserved, got %+v", result.Results)
 	}
+	if len(result.FilesChanged) != 0 || result.HunksApplied != 0 {
+		t.Fatalf("expected rolled-back files_changed=[] and hunks_applied=0, got files_changed=%v hunks_applied=%d", result.FilesChanged, result.HunksApplied)
+	}
 	oneBytes, _ := os.ReadFile(onePath)
 	twoBytes, _ := os.ReadFile(twoPath)
 	if string(oneBytes) != "old1\n" || string(twoBytes) != "old2\n" {
@@ -576,5 +579,90 @@ func TestAtomicRollbackRestoresDeletedFilePermissions(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != originalPerm {
 		t.Fatalf("restored permissions changed: got %o want %o", got, originalPerm)
+	}
+}
+
+func TestPatchDeletesLineStartingWithDoubleDash(t *testing.T) {
+	root := t.TempDir()
+	manager, err := workspace.NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+	path := filepath.Join(root, "query.sql")
+	if err := os.WriteFile(path, []byte("-- old comment\nSELECT 1;\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	diff := "--- a/query.sql\n+++ b/query.sql\n@@ -1,2 +1,2 @@\n--- old comment\n+-- new comment\n SELECT 1;\n"
+	if _, err := Apply(manager, diff, Options{Atomic: true}); err != nil {
+		t.Fatalf("Apply failed on -- line: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "-- new comment\nSELECT 1;\n" {
+		t.Fatalf("unexpected content: data=%q err=%v", string(data), err)
+	}
+}
+
+func TestPatchZeroContextPureInsertionAppliesAfterTargetLine(t *testing.T) {
+	root := t.TempDir()
+	manager, err := workspace.NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+	path := filepath.Join(root, "lines.txt")
+	if err := os.WriteFile(path, []byte("line1\nline2\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	// Standard git diff -U0 insertion after line 1 and after line 2.
+	diff := "--- a/lines.txt\n+++ b/lines.txt\n@@ -1,0 +2,1 @@\n+after1\n@@ -2,0 +4,1 @@\n+after2\n"
+	if _, err := Apply(manager, diff, Options{Atomic: true}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if want := "line1\nafter1\nline2\nafter2\n"; string(data) != want {
+		t.Fatalf("got %q want %q", string(data), want)
+	}
+}
+
+func TestParseManyHunksCapsSliceCapacity(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("--- a/big.txt\n+++ b/big.txt\n")
+	for i := 1; i <= 2000; i++ {
+		b.WriteString("@@ -1,1 +1,1 @@\n-a\n+b\n")
+	}
+	parsed, err := Parse(b.String())
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(parsed.Files) != 1 || len(parsed.Files[0].Hunks) != 2000 {
+		t.Fatalf("unexpected hunk count: %+v", parsed)
+	}
+	if got := cap(parsed.Files[0].Hunks[0].Lines); got > 16 {
+		t.Fatalf("expected small hunk capacity, got %d", got)
+	}
+}
+
+func TestPatchRejectsBinaryTarget(t *testing.T) {
+	root := t.TempDir()
+	manager, err := workspace.NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+	path := filepath.Join(root, "blob.bin")
+	if err := os.WriteFile(path, []byte{'a', 0, 'b', '\n'}, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	diff := "--- a/blob.bin\n+++ b/blob.bin\n@@ -1,1 +1,1 @@\n-a\n+b\n"
+	_, err = Apply(manager, diff, Options{Atomic: true})
+	if err == nil {
+		t.Fatal("expected binary file patch to fail")
+	}
+	te, ok := protocol.AsToolError(err)
+	if !ok || te.Code != protocol.CodeBinaryFile {
+		t.Fatalf("expected binary_file, got %v", err)
 	}
 }

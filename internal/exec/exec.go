@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"agentrail/internal/protocol"
@@ -70,49 +71,33 @@ func Run(options Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	if len(env) > 0 {
+	if env != nil {
 		cmd.Env = env
-	}
-
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return Result{}, protocol.ErrDetails(protocol.CodeExecFailed, "failed to create stdout pipe", protocol.ErrorDetails{"argv0": options.Argv[0], "cwd": options.CWD})
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return Result{}, protocol.ErrDetails(protocol.CodeExecFailed, "failed to create stderr pipe", protocol.ErrorDetails{"argv0": options.Argv[0], "cwd": options.CWD})
 	}
 
 	job, err := newJobObject()
 	if err != nil {
-		return Result{}, protocol.ErrDetails(protocol.CodeExecFailed, "failed to initialize process job", protocol.ErrorDetails{"argv0": options.Argv[0], "cwd": options.CWD})
+		return Result{}, protocol.ErrDetails(protocol.CodeExecFailed, "failed to initialize process job", execErrorDetails(options, 0, false))
 	}
 	if job != nil {
 		defer job.Close()
+		prepareCommandForJob(cmd)
 	}
 
 	capture := newSharedOutputCapture(maxOutputBytes)
-	var copyWG sync.WaitGroup
-	copyWG.Add(2)
-	go func() {
-		defer copyWG.Done()
-		_, _ = io.Copy(capture.stdoutWriter(), stdoutPipe)
-	}()
-	go func() {
-		defer copyWG.Done()
-		_, _ = io.Copy(capture.stderrWriter(), stderrPipe)
-	}()
+	cmd.Stdout = capture.stdoutWriter()
+	cmd.Stderr = capture.stderrWriter()
 
 	start := time.Now()
 	if err := cmd.Start(); err != nil {
-		return Result{}, protocol.ErrDetails(protocol.CodeExecFailed, "failed to start process", protocol.ErrorDetails{"argv0": options.Argv[0], "cwd": options.CWD})
+		return Result{}, protocol.ErrDetails(protocol.CodeExecFailed, "failed to start process", execErrorDetails(options, 0, false))
 	}
 	if job != nil {
-		if err := job.Assign(cmd.Process.Pid); err != nil {
+		if err := job.AssignAndResume(cmd.Process.Pid); err != nil {
 			_ = cmd.Process.Kill()
-			_, _ = cmd.Process.Wait()
-			copyWG.Wait()
-			return capture.result(time.Since(start).Milliseconds(), -1), protocol.ErrDetails(protocol.CodeExecFailed, "failed to assign process to job", protocol.ErrorDetails{"argv0": options.Argv[0], "cwd": options.CWD})
+			_ = cmd.Wait()
+			res := capture.result(time.Since(start).Milliseconds(), -1)
+			return res, protocol.ErrDetails(protocol.CodeExecFailed, "failed to assign process to job", execErrorDetails(options, res.OutputBytes, false))
 		}
 	}
 
@@ -144,19 +129,12 @@ func Run(options Options) (Result, error) {
 		runErr = <-waitCh
 	}
 
-	copyWG.Wait()
 	timingMS := time.Since(start).Milliseconds()
 	result := capture.result(timingMS, 0)
 
 	if timedOut {
 		result.ExitCode = -1
-		return result, protocol.ErrDetails(protocol.CodeTimeout, "process timed out", protocol.ErrorDetails{
-			"argv0":               options.Argv[0],
-			"cwd":                 options.CWD,
-			"timeout_ms":          options.TimeoutMS,
-			"output_bytes":        result.OutputBytes,
-			"process_tree_killed": processTreeKilled,
-		})
+		return result, protocol.ErrDetails(protocol.CodeTimeout, "process timed out", execErrorDetails(options, result.OutputBytes, processTreeKilled))
 	}
 
 	if runErr != nil {
@@ -165,7 +143,7 @@ func Run(options Options) (Result, error) {
 			result.ExitCode = exitErr.ExitCode()
 			return result, nil
 		}
-		return result, protocol.ErrDetails(protocol.CodeExecFailed, "failed while waiting for process", protocol.ErrorDetails{"argv0": options.Argv[0], "cwd": options.CWD, "output_bytes": result.OutputBytes})
+		return result, protocol.ErrDetails(protocol.CodeExecFailed, "failed while waiting for process", execErrorDetails(options, result.OutputBytes, processTreeKilled))
 	}
 
 	if cmd.ProcessState != nil {
@@ -174,18 +152,79 @@ func Run(options Options) (Result, error) {
 	return result, nil
 }
 
+func execErrorDetails(options Options, outputBytes int64, processTreeKilled bool) protocol.ErrorDetails {
+	argv0 := ""
+	if len(options.Argv) > 0 {
+		argv0 = options.Argv[0]
+	}
+	return protocol.ErrorDetails{
+		"argv0":               argv0,
+		"cwd":                 options.CWD,
+		"timeout_ms":          options.TimeoutMS,
+		"output_bytes":        outputBytes,
+		"process_tree_killed": processTreeKilled,
+	}
+}
+
+type envEntry struct {
+	key   string
+	value string
+}
+
+type envTable struct {
+	entries map[string]envEntry
+}
+
+func newEnvTable(capacity int) *envTable {
+	return &envTable{entries: make(map[string]envEntry, capacity)}
+}
+
+func envLookupKey(key string) string {
+	if runtime.GOOS == "windows" {
+		return strings.ToUpper(key)
+	}
+	return key
+}
+
+func (t *envTable) set(key, value string) {
+	norm := envLookupKey(key)
+	if existing, ok := t.entries[norm]; ok {
+		t.entries[norm] = envEntry{key: existing.key, value: value}
+		return
+	}
+	t.entries[norm] = envEntry{key: key, value: value}
+}
+
+func (t *envTable) toSlice() []string {
+	if len(t.entries) == 0 {
+		return []string{}
+	}
+	items := make([]envEntry, 0, len(t.entries))
+	for _, entry := range t.entries {
+		items = append(items, entry)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].key < items[j].key
+	})
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		result = append(result, item.key+"="+item.value)
+	}
+	return result
+}
+
 func parseEnv(raw json.RawMessage, workspaceRoot string) ([]string, error) {
 	if len(raw) == 0 {
-		base := envToMap(os.Environ())
+		base := envToTable(os.Environ())
 		if err := applyWorkspaceEnvDefaults(base, workspaceRoot); err != nil {
 			return nil, err
 		}
-		return mapToEnv(base), nil
+		return base.toSlice(), nil
 	}
 
 	var mapEnv map[string]string
 	if err := json.Unmarshal(raw, &mapEnv); err == nil {
-		base := envToMap(os.Environ())
+		base := envToTable(os.Environ())
 		if err := applyWorkspaceEnvDefaults(base, workspaceRoot); err != nil {
 			return nil, err
 		}
@@ -193,14 +232,17 @@ func parseEnv(raw json.RawMessage, workspaceRoot string) ([]string, error) {
 			if err := validateEnvEntry(key, value); err != nil {
 				return nil, err
 			}
-			setEnvValue(base, key, value)
+			base.set(key, value)
 		}
-		return mapToEnv(base), nil
+		return base.toSlice(), nil
 	}
 
 	var listEnv []string
 	if err := json.Unmarshal(raw, &listEnv); err == nil {
-		windowsValues := map[string]string{}
+		if len(listEnv) == 0 {
+			return []string{}, nil
+		}
+		table := newEnvTable(len(listEnv))
 		for _, item := range listEnv {
 			idx := strings.IndexByte(item, '=')
 			if idx <= 0 || strings.IndexByte(item, 0) >= 0 {
@@ -210,11 +252,11 @@ func parseEnv(raw json.RawMessage, workspaceRoot string) ([]string, error) {
 				return nil, err
 			}
 			if runtime.GOOS == "windows" {
-				setEnvValue(windowsValues, item[:idx], item[idx+1:])
+				table.set(item[:idx], item[idx+1:])
 			}
 		}
 		if runtime.GOOS == "windows" {
-			return mapToEnv(windowsValues), nil
+			return table.toSlice(), nil
 		}
 		return listEnv, nil
 	}
@@ -222,7 +264,7 @@ func parseEnv(raw json.RawMessage, workspaceRoot string) ([]string, error) {
 	return nil, protocol.ErrDetails(protocol.CodeInvalidRequest, "env must be an object or array", protocol.ErrorDetails{"field": "env", "reason": "invalid_type"})
 }
 
-func applyWorkspaceEnvDefaults(env map[string]string, workspaceRoot string) error {
+func applyWorkspaceEnvDefaults(env *envTable, workspaceRoot string) error {
 	root := workspaceRoot
 	if root == "" {
 		return nil
@@ -237,63 +279,68 @@ func applyWorkspaceEnvDefaults(env map[string]string, workspaceRoot string) erro
 	}
 	defer rootHandle.Close()
 
-	dirs := map[string]string{
-		"AGENTRAIL_RUNTIME_DIR": filepath.Join(root, ".agentrail"),
-		"TMP":                   filepath.Join(root, ".agentrail", "tmp"),
-		"TEMP":                  filepath.Join(root, ".agentrail", "tmp"),
-		"TMPDIR":                filepath.Join(root, ".agentrail", "tmp"),
-		"GOCACHE":               filepath.Join(root, ".agentrail", "cache", "go-build"),
-		"GOTMPDIR":              filepath.Join(root, ".agentrail", "tmp", "go"),
-		"APPDATA":               filepath.Join(root, ".agentrail", "appdata", "roaming"),
-		"LOCALAPPDATA":          filepath.Join(root, ".agentrail", "appdata", "local"),
-		"XDG_CACHE_HOME":        filepath.Join(root, ".agentrail", "cache", "xdg"),
-		"npm_config_cache":      filepath.Join(root, ".agentrail", "cache", "npm"),
-		"PIP_CACHE_DIR":         filepath.Join(root, ".agentrail", "cache", "pip"),
-		"CARGO_HOME":            filepath.Join(root, ".agentrail", "cache", "cargo-home"),
-		"CARGO_TARGET_DIR":      filepath.Join(root, ".agentrail", "cache", "cargo-target"),
+	type envDir struct {
+		key string
+		rel string
 	}
-	for key, dir := range dirs {
-		if err := ensureWorkspaceRuntimeDir(rootHandle, root, dir); err != nil {
-			return err
+	defaults := []envDir{
+		{"AGENTRAIL_RUNTIME_DIR", ".agentrail"},
+		{"TMP", filepath.Join(".agentrail", "tmp")},
+		{"TEMP", filepath.Join(".agentrail", "tmp")},
+		{"TMPDIR", filepath.Join(".agentrail", "tmp")},
+		{"GOCACHE", filepath.Join(".agentrail", "cache", "go-build")},
+		{"GOTMPDIR", filepath.Join(".agentrail", "tmp", "go")},
+		{"APPDATA", filepath.Join(".agentrail", "appdata", "roaming")},
+		{"LOCALAPPDATA", filepath.Join(".agentrail", "appdata", "local")},
+		{"XDG_CACHE_HOME", filepath.Join(".agentrail", "cache", "xdg")},
+		{"npm_config_cache", filepath.Join(".agentrail", "cache", "npm")},
+		{"PIP_CACHE_DIR", filepath.Join(".agentrail", "cache", "pip")},
+		{"CARGO_HOME", filepath.Join(".agentrail", "cache", "cargo-home")},
+		{"CARGO_TARGET_DIR", filepath.Join(".agentrail", "cache", "cargo-target")},
+	}
+	created := make(map[string]struct{}, len(defaults))
+	for _, item := range defaults {
+		fullDir := filepath.Join(root, item.rel)
+		if _, done := created[item.rel]; !done {
+			if err := ensureWorkspaceRuntimeDir(rootHandle, item.rel, fullDir); err != nil {
+				return err
+			}
+			created[item.rel] = struct{}{}
 		}
-		setEnvValue(env, key, dir)
+		env.set(item.key, fullDir)
 	}
 	return nil
 }
 
-func ensureWorkspaceRuntimeDir(rootHandle *os.Root, workspaceRoot, dir string) error {
-	relative, err := filepath.Rel(workspaceRoot, dir)
-	if err != nil || relative == ".." || filepath.IsAbs(relative) || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
-		return protocol.ErrDetails(protocol.CodeExecFailed, "workspace runtime directory escapes workspace", protocol.ErrorDetails{"path": filepath.ToSlash(dir)})
+func ensureWorkspaceRuntimeDir(rootHandle *os.Root, relative, fullDir string) error {
+	if info, err := rootHandle.Stat(relative); err == nil && info.IsDir() {
+		return nil
 	}
 	if err := rootHandle.MkdirAll(relative, 0o755); err != nil {
-		return protocol.ErrDetails(protocol.CodeExecFailed, "failed to initialize workspace runtime directory", protocol.ErrorDetails{"path": filepath.ToSlash(dir)})
+		return protocol.ErrDetails(protocol.CodeExecFailed, "failed to initialize workspace runtime directory", protocol.ErrorDetails{"path": filepath.ToSlash(fullDir)})
 	}
 	return nil
 }
 
-func envToMap(entries []string) map[string]string {
-	result := make(map[string]string, len(entries))
+func envToTable(entries []string) *envTable {
+	table := newEnvTable(len(entries))
 	for _, entry := range entries {
 		idx := strings.IndexByte(entry, '=')
 		if idx <= 0 {
 			continue
 		}
-		setEnvValue(result, entry[:idx], entry[idx+1:])
+		table.set(entry[:idx], entry[idx+1:])
 	}
-	return result
+	return table
 }
 
-func setEnvValue(values map[string]string, key, value string) {
-	if runtime.GOOS == "windows" {
-		for existing := range values {
-			if strings.EqualFold(existing, key) {
-				values[existing] = value
-				return
-			}
-		}
+func envToMap(entries []string) map[string]string {
+	table := envToTable(entries)
+	result := make(map[string]string, len(table.entries))
+	for _, entry := range table.entries {
+		result[entry.key] = entry.value
 	}
-	values[key] = value
+	return result
 }
 
 func validateEnvEntry(key, value string) error {
@@ -301,19 +348,6 @@ func validateEnvEntry(key, value string) error {
 		return protocol.ErrDetails(protocol.CodeInvalidRequest, "invalid environment entry", protocol.ErrorDetails{"field": "env", "reason": "invalid_entry"})
 	}
 	return nil
-}
-
-func mapToEnv(values map[string]string) []string {
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	result := make([]string, 0, len(keys))
-	for _, key := range keys {
-		result = append(result, key+"="+values[key])
-	}
-	return result
 }
 
 type sharedOutputCapture struct {
@@ -327,8 +361,9 @@ type sharedOutputCapture struct {
 }
 
 type streamCaptureWriter struct {
-	capture *sharedOutputCapture
-	stdout  bool
+	capture        *sharedOutputCapture
+	stdout         bool
+	drainFastPath  atomic.Bool
 }
 
 func newSharedOutputCapture(limit int64) *sharedOutputCapture {
@@ -344,6 +379,10 @@ func (c *sharedOutputCapture) stderrWriter() io.Writer {
 }
 
 func (w *streamCaptureWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 || w.drainFastPath.Load() {
+		return len(p), nil
+	}
+
 	w.capture.mu.Lock()
 	defer w.capture.mu.Unlock()
 
@@ -369,6 +408,7 @@ func (w *streamCaptureWriter) Write(p []byte) (int, error) {
 		} else {
 			w.capture.stderrTruncated = true
 		}
+		w.drainFastPath.Store(true)
 	}
 	return len(p), nil
 }

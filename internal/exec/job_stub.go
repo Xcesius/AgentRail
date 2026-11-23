@@ -2,13 +2,17 @@
 
 package execmod
 
+import osexec "os/exec"
+
 type jobObject struct{}
+
+func prepareCommandForJob(cmd *osexec.Cmd) {}
 
 func newJobObject() (*jobObject, error) {
 	return nil, nil
 }
 
-func (j *jobObject) Assign(pid int) error {
+func (j *jobObject) AssignAndResume(pid int) error {
 	return nil
 }
 

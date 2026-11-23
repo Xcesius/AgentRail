@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 
 	"agentrail/internal/filemeta"
 	"agentrail/internal/protocol"
+	"agentrail/internal/textutil"
 	"agentrail/internal/workspace"
 	writemod "agentrail/internal/write"
 )
@@ -103,7 +105,7 @@ func Apply(manager *workspace.Manager, diff string, options Options) (ApplyResul
 	}
 
 	if err := validateExpectedTokenKeys(options.ExpectedFileTokens, targets); err != nil {
-		return ApplyResult{RepositoryState: RepositoryStateUnchanged, FilesChanged: []string{}, Results: []FileResult{}}, err
+		return ApplyResult{RepositoryState: RepositoryStateUnchanged, FilesChanged: []string{}, Results: results}, err
 	}
 
 	if options.Atomic {
@@ -126,6 +128,15 @@ func canonicalTargetKey(path string) string {
 
 func buildPlan(manager *workspace.Manager, filePatch FilePatch, expectedFileTokens map[string]string, exactContents map[string][]byte) filePlan {
 	opType := patchType(filePatch)
+	if opType == "invalid" {
+		plan := filePlan{Manager: manager, Operation: opType, DisplayPath: "/dev/null"}
+		plan.Result = failureResult(plan.DisplayPath, protocol.ErrorPayload{
+			Code:    protocol.CodePatchFailed,
+			Message: "invalid patch target paths",
+			Details: protocol.ErrorDetails{"path": plan.DisplayPath, "phase": "validation"},
+		})
+		return plan
+	}
 	target := filePatch.NewPath
 	if opType == "delete" {
 		target = filePatch.OldPath
@@ -151,6 +162,18 @@ func buildPlan(manager *workspace.Manager, filePatch FilePatch, expectedFileToke
 	plan.OriginalExists = exists
 	plan.OriginalBytes = original
 	if exists {
+		sample := original
+		if len(sample) > 4096 {
+			sample = sample[:4096]
+		}
+		if textutil.IsLikelyBinary(sample) {
+			plan.Result = failureResult(plan.DisplayPath, protocol.ErrorPayload{
+				Code:    protocol.CodeBinaryFile,
+				Message: "binary file cannot be patched",
+				Details: protocol.ErrorDetails{"path": plan.DisplayPath},
+			})
+			return plan
+		}
 		plan.OriginalToken = filemeta.TokenFromBytes(original)
 		if info, statErr := os.Stat(resolved); statErr == nil {
 			plan.OriginalMode = info.Mode()
@@ -280,9 +303,19 @@ func commitAtomic(plans []filePlan, createDirs bool) (ApplyResult, error) {
 		if err != nil {
 			plans[planIndex].Result = fileResult
 			rollbackErrs := rollbackCommittedPlans(committed)
-			repositoryState := determineAtomicFailureState(append(committed, plan), rollbackErrs)
+			failedPlans := make([]filePlan, 0, len(committed)+1)
+			failedPlans = append(failedPlans, committed...)
+			failedPlans = append(failedPlans, plan)
+			repositoryState := determineAtomicFailureState(failedPlans, rollbackErrs)
 			result.RepositoryState = repositoryState
 			result.Results = atomicResults(plans, repositoryState)
+			result.FilesChanged = []string{}
+			result.HunksApplied = 0
+			for _, fr := range result.Results {
+				if fr.Changed {
+					result.FilesChanged = append(result.FilesChanged, fr.Path)
+				}
+			}
 			if repositoryState == RepositoryStateUnchanged {
 				return result, protocol.ErrDetails(protocol.CodeCommitFailed, "atomic patch commit failed", protocol.ErrorDetails{"phase": "commit", "repository_state": repositoryState})
 			}
@@ -384,10 +417,30 @@ func restoreOriginal(plan filePlan) error {
 		if err := removeFileInRoot(plan.Manager.Root, plan.DisplayPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
+		cleanupEmptyParentDirs(plan.Manager.Root, plan.DisplayPath)
 		return nil
 	}
 	_, err := restoreFileInRoot(plan.Manager.Root, plan.DisplayPath, plan.OriginalBytes, true, plan.OriginalMode)
 	return err
+}
+
+func cleanupEmptyParentDirs(rootPath, displayPath string) {
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return
+	}
+	defer root.Close()
+	dir := filepath.Dir(filepath.Clean(filepath.FromSlash(displayPath)))
+	for dir != "." && dir != "" && dir != string(os.PathSeparator) {
+		if err := root.Remove(dir); err != nil {
+			return
+		}
+		next := filepath.Dir(dir)
+		if next == dir {
+			return
+		}
+		dir = next
+	}
 }
 
 func createDirsEnabled(options Options) bool {
@@ -548,6 +601,9 @@ func readOriginalFile(path string) ([]byte, bool, error) {
 }
 
 func patchType(filePatch FilePatch) string {
+	if filePatch.OldPath == "/dev/null" && filePatch.NewPath == "/dev/null" {
+		return "invalid"
+	}
 	if filePatch.OldPath == "/dev/null" && filePatch.NewPath != "/dev/null" {
 		return "create"
 	}
@@ -574,7 +630,9 @@ func applyToContent(content string, filePatch FilePatch) (string, int, error) {
 
 	for _, hunk := range filePatch.Hunks {
 		expected := hunk.OldStart - 1
-		if hunk.OldStart == 0 {
+		if hunk.OldLines == 0 {
+			expected = hunk.OldStart
+		} else if hunk.OldStart == 0 {
 			expected = 0
 		}
 		if expected < cursor || expected > len(lines) {
@@ -618,6 +676,9 @@ func applyToContent(content string, filePatch FilePatch) (string, int, error) {
 		}
 
 		hunkTouchesEOF := idx == len(lines)
+		if hunkTouchesEOF && hunk.OldNoTrailingNL && hunk.OldLines > 0 && len(lines) > 0 && lines[len(lines)-1].Ending != "" {
+			return "", hunksApplied, protocol.ErrDetails(protocol.CodePatchFailed, "patch trailing newline mismatch", protocol.ErrorDetails{"hunk": hunksApplied + 1, "expected": "no_trailing_newline", "actual": "trailing_newline"})
+		}
 		cursor = idx
 		hunksApplied++
 		if hunkTouchesEOF && len(result) > 0 {

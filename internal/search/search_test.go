@@ -169,3 +169,89 @@ func TestSearchRejectsFileSymlinkEscapeWithoutOptIn(t *testing.T) {
 		t.Fatalf("expected path_denied, got %v", err)
 	}
 }
+
+func TestSearchGlobSupportsRecursiveDoubleStarAndBackslashes(t *testing.T) {
+	root := t.TempDir()
+	for _, rel := range []string{"top.go", "nested/sub/app.go", "nested/sub/app.txt"} {
+		full := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(full, []byte("needle\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+	manager, err := workspace.NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+
+	matches, err := Search(context.Background(), manager, Options{Query: "needle", Glob: "**/*.go", Deterministic: true})
+	if err != nil {
+		t.Fatalf("Search **/*.go: %v", err)
+	}
+	if len(matches) != 2 || matches[0].Path != "nested/sub/app.go" || matches[1].Path != "top.go" {
+		t.Fatalf("unexpected **/*.go matches: %+v", matches)
+	}
+
+	matches, err = Search(context.Background(), manager, Options{Query: "needle", Glob: `nested\sub\*.go`, Deterministic: true})
+	if err != nil {
+		t.Fatalf("Search backslash glob: %v", err)
+	}
+	if len(matches) != 1 || matches[0].Path != "nested/sub/app.go" {
+		t.Fatalf("unexpected backslash glob matches: %+v", matches)
+	}
+}
+
+func TestSearchCaseInsensitiveUnicodeColumnOffsetIsExact(t *testing.T) {
+	root := t.TempDir()
+	// U+0130 ('İ') is 2 UTF-8 bytes, but bytes.ToLower expands it to 3 bytes.
+	line := "İ needle\n"
+	if err := os.WriteFile(filepath.Join(root, "uni.txt"), []byte(line), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	manager, err := workspace.NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+
+	matches, err := Search(context.Background(), manager, Options{Query: "NEEDLE", CaseSensitive: false, Deterministic: true})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	// 'İ' = 2 bytes, ' ' = 1 byte => 'needle' starts at byte index 3 (1-based col 4).
+	if len(matches) != 1 || matches[0].Col != 4 {
+		t.Fatalf("expected col=4, got %+v", matches)
+	}
+}
+
+func TestBoundedDoesNotOverTruncateAfterInvalidUTF8Byte(t *testing.T) {
+	// Single Latin-1 byte at index 2 followed by 600 ASCII chars.
+	raw := "ab\xe9" + string(make([]byte, 600))
+	buf := []byte(raw)
+	for i := 3; i < len(buf); i++ {
+		buf[i] = 'x'
+	}
+	got := bounded(string(buf), 512)
+	if len(got) != 512 {
+		t.Fatalf("expected bounded length 512, got %d", len(got))
+	}
+}
+
+func TestSearchAllowsWhitespaceQuery(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "ws.txt"), []byte("a  b\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	manager, err := workspace.NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+	matches, err := Search(context.Background(), manager, Options{Query: "  ", Deterministic: true})
+	if err != nil {
+		t.Fatalf("Search whitespace: %v", err)
+	}
+	if len(matches) != 1 || matches[0].Col != 2 {
+		t.Fatalf("unexpected whitespace match: %+v", matches)
+	}
+}

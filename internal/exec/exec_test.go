@@ -196,6 +196,37 @@ func TestParseEnvArrayRemainsFullReplacement(t *testing.T) {
 	}
 }
 
+func TestParseEnvEmptyArrayReturnsNonNilEmptySlice(t *testing.T) {
+	root := t.TempDir()
+	env, err := parseEnv(json.RawMessage(`[]`), root)
+	if err != nil {
+		t.Fatalf("parseEnv: %v", err)
+	}
+	if env == nil || len(env) != 0 {
+		t.Fatalf("expected non-nil empty env slice, got %#v", env)
+	}
+}
+
+func TestRunExecFailedIncludesRequiredDetails(t *testing.T) {
+	_, err := Run(Options{
+		Argv:      []string{"definitely-not-a-real-agentrail-binary-xyz"},
+		CWD:       t.TempDir(),
+		TimeoutMS: 250,
+	})
+	if err == nil {
+		t.Fatal("expected exec failure")
+	}
+	te, ok := protocol.AsToolError(err)
+	if !ok || te.Code != protocol.CodeExecFailed {
+		t.Fatalf("expected exec_failed, got %v", err)
+	}
+	for _, key := range []string{"argv0", "cwd", "timeout_ms", "output_bytes", "process_tree_killed"} {
+		if _, exists := te.Details[key]; !exists {
+			t.Fatalf("expected %q in exec_failed details, got %+v", key, te.Details)
+		}
+	}
+}
+
 func TestParseEnvRejectsRuntimeSymlinkEscape(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()

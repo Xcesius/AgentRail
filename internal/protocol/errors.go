@@ -1,6 +1,9 @@
 package protocol
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 const (
 	CodeInvalidRequest    = "invalid_request"
@@ -50,8 +53,11 @@ func AsToolError(err error) (*ToolError, bool) {
 	if err == nil {
 		return nil, false
 	}
-	te, ok := err.(*ToolError)
-	return te, ok
+	var te *ToolError
+	if errors.As(err, &te) {
+		return te, true
+	}
+	return nil, false
 }
 
 func cloneDetails(details ErrorDetails) ErrorDetails {

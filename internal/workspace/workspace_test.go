@@ -146,3 +146,105 @@ func TestResolveReadPathRejectsActualWindowsSystemDirectoryAcrossDrives(t *testi
 		t.Fatalf("expected path_denied, got %v", err)
 	}
 }
+
+func TestResolveReadPathRejectsExtendedAndDeviceWindowsPaths(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-specific path prefixes")
+	}
+	systemRoot := os.Getenv("SystemRoot")
+	if systemRoot == "" {
+		t.Skip("SystemRoot is unavailable")
+	}
+	manager, err := NewManagerFromRoot(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+
+	for _, candidate := range []string{
+		`\\?\` + filepath.Join(systemRoot, "win.ini"),
+		`\\.\NUL`,
+		`\??\` + filepath.Join(systemRoot, "win.ini"),
+	} {
+		_, err := manager.ResolveReadPath(candidate, true)
+		if err == nil {
+			t.Fatalf("expected %q to be denied", candidate)
+		}
+		te, ok := protocol.AsToolError(err)
+		if !ok || te.Code != protocol.CodePathDenied {
+			t.Fatalf("expected path_denied for %q, got %v", candidate, err)
+		}
+	}
+}
+
+func TestSystemDirsForPathIncludesDriveFallbacks(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-specific system directory policy")
+	}
+	t.Setenv("SystemRoot", "")
+	t.Setenv("windir", "")
+	t.Setenv("ProgramFiles", "")
+	t.Setenv("ProgramW6432", "")
+	t.Setenv("ProgramFiles(x86)", "")
+	t.Setenv("ProgramData", "")
+	t.Setenv("SystemDrive", "C:")
+
+	dirs := systemDirsForPath(`Z:\workspace`)
+	want := map[string]bool{
+		`z:\windows`:             false,
+		`z:\program files`:       false,
+		`z:\program files (x86)`: false,
+		`z:\programdata`:         false,
+		`c:\windows`:             false,
+		`c:\programdata`:         false,
+	}
+	for _, dir := range dirs {
+		lower := strings.ToLower(dir)
+		if _, ok := want[lower]; ok {
+			want[lower] = true
+		}
+	}
+	for dir, found := range want {
+		if !found {
+			t.Fatalf("expected fallback system dir %q in %v", dir, dirs)
+		}
+	}
+}
+
+func TestIsSystemDeniedStillProtectsSystemDirsUnderDriveRootWorkspace(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-specific system directory policy")
+	}
+	systemRoot := os.Getenv("SystemRoot")
+	if systemRoot == "" {
+		t.Skip("SystemRoot is unavailable")
+	}
+	driveRoot := filepath.VolumeName(systemRoot) + string(os.PathSeparator)
+	manager := &Manager{
+		Root:              driveRoot,
+		rootWithSep:       driveRoot,
+		rootLower:         strings.ToLower(driveRoot),
+		rootWithSepLower:  strings.ToLower(driveRoot),
+		systemDirectories: systemDirsForPath(driveRoot),
+	}
+	if !manager.isSystemDenied(filepath.Join(systemRoot, "win.ini")) {
+		t.Fatal("expected system directory under drive-root workspace to remain denied")
+	}
+}
+
+func TestIsDeniedPathIgnoresWorkspaceAncestors(t *testing.T) {
+	base := t.TempDir()
+	wsRoot := filepath.Join(base, "node_modules", "my-workspace")
+	if err := os.MkdirAll(wsRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	manager, err := NewManagerFromRoot(wsRoot)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+	if _, err := manager.ResolveWritePath("src/app.go"); err != nil {
+		t.Fatalf("expected in-workspace path under ancestor node_modules to be allowed, got %v", err)
+	}
+	if _, err := manager.ResolveWritePath("node_modules/pkg/index.js"); err == nil {
+		t.Fatal("expected nested node_modules inside workspace to remain denied")
+	}
+}

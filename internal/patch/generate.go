@@ -79,6 +79,13 @@ func readTextTarget(path, displayPath string) ([]byte, bool, error) {
 			protocol.ErrorDetails{"field": "path", "reason": "directory"},
 		)
 	}
+	if !info.Mode().IsRegular() {
+		return nil, false, protocol.ErrDetails(
+			protocol.CodeInvalidRequest,
+			"path is not a regular file",
+			protocol.ErrorDetails{"field": "path", "reason": "unsupported_file_type"},
+		)
+	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -114,23 +121,78 @@ func buildUnifiedDiff(displayPath, original string, originalExists bool, updated
 		return out.String()
 	}
 
-	fmt.Fprintf(
-		&out,
-		"@@ -%d,%d +%d,%d @@\n",
-		diffRangeStart(len(originalLines)),
-		len(originalLines),
-		diffRangeStart(len(updatedLines)),
-		len(updatedLines),
-	)
-	for i, line := range originalLines {
-		fmt.Fprintf(&out, "-%s\n", line)
+	// Trim unchanged common prefix and suffix lines so single-line edits on large
+	// files produce compact hunks with standard 3-line context instead of full-file rewrites.
+	prefix := 0
+	for prefix < len(originalLines) && prefix < len(updatedLines) && originalLines[prefix] == updatedLines[prefix] {
+		prefix++
+	}
+	suffix := 0
+	for suffix < len(originalLines)-prefix && suffix < len(updatedLines)-prefix &&
+		originalLines[len(originalLines)-1-suffix] == updatedLines[len(updatedLines)-1-suffix] {
+		suffix++
+	}
+
+	// If normalized lines are identical (trailing-newline or CRLF/LF-only change),
+	// keep the final line in the changed range so the hunk reflects the mutation.
+	if prefix == len(originalLines) && prefix == len(updatedLines) && len(originalLines) > 0 {
+		prefix = len(originalLines) - 1
+		suffix = 0
+	}
+
+	const contextLines = 3
+	ctxStart := prefix - contextLines
+	if ctxStart < 0 {
+		ctxStart = 0
+	}
+	oldChangeEnd := len(originalLines) - suffix
+	newChangeEnd := len(updatedLines) - suffix
+	oldEnd := oldChangeEnd + contextLines
+	if oldEnd > len(originalLines) {
+		oldEnd = len(originalLines)
+	}
+	newEnd := newChangeEnd + contextLines
+	if newEnd > len(updatedLines) {
+		newEnd = len(updatedLines)
+	}
+
+	// If the trailing newline changed and the suffix was trimmed past EOF, include EOF.
+	if originalTrailingNewline != updatedTrailingNewline && (oldEnd < len(originalLines) || newEnd < len(updatedLines)) {
+		oldEnd = len(originalLines)
+		newEnd = len(updatedLines)
+		oldChangeEnd = len(originalLines)
+		newChangeEnd = len(updatedLines)
+	}
+
+	oldCount := oldEnd - ctxStart
+	newCount := newEnd - ctxStart
+	oldStart := diffRangeStartAt(ctxStart, oldCount)
+	newStart := diffRangeStartAt(ctxStart, newCount)
+
+	fmt.Fprintf(&out, "@@ -%d,%d +%d,%d @@\n", oldStart, oldCount, newStart, newCount)
+
+	// Leading context
+	for i := ctxStart; i < prefix; i++ {
+		fmt.Fprintf(&out, " %s\n", originalLines[i])
+	}
+	// Removed lines
+	for i := prefix; i < oldChangeEnd; i++ {
+		fmt.Fprintf(&out, "-%s\n", originalLines[i])
 		if i == len(originalLines)-1 && !originalTrailingNewline {
 			out.WriteString("\\ No newline at end of file\n")
 		}
 	}
-	for i, line := range updatedLines {
-		fmt.Fprintf(&out, "+%s\n", line)
+	// Added lines
+	for i := prefix; i < newChangeEnd; i++ {
+		fmt.Fprintf(&out, "+%s\n", updatedLines[i])
 		if i == len(updatedLines)-1 && !updatedTrailingNewline {
+			out.WriteString("\\ No newline at end of file\n")
+		}
+	}
+	// Trailing context
+	for i := oldChangeEnd; i < oldEnd; i++ {
+		fmt.Fprintf(&out, " %s\n", originalLines[i])
+		if i == len(originalLines)-1 && !originalTrailingNewline && !updatedTrailingNewline {
 			out.WriteString("\\ No newline at end of file\n")
 		}
 	}
@@ -146,9 +208,9 @@ func normalizePatchContent(content string) string {
 	return strings.ReplaceAll(content, "\r\n", "\n")
 }
 
-func diffRangeStart(lineCount int) int {
+func diffRangeStartAt(zeroBasedStart, lineCount int) int {
 	if lineCount == 0 {
-		return 0
+		return zeroBasedStart
 	}
-	return 1
+	return zeroBasedStart + 1
 }

@@ -16,12 +16,13 @@ func IsLikelyBinary(sample []byte) bool {
 		return true
 	}
 
-	if utf8.Valid(sample) {
+	utf8Sample := trimIncompleteUTF8Tail(sample)
+	if len(utf8Sample) > 0 && utf8.Valid(utf8Sample) {
 		controls := 0
 		runes := 0
-		for len(sample) > 0 {
-			r, size := utf8.DecodeRune(sample)
-			sample = sample[size:]
+		for len(utf8Sample) > 0 {
+			r, size := utf8.DecodeRune(utf8Sample)
+			utf8Sample = utf8Sample[size:]
 			runes++
 
 			if r == '\n' || r == '\r' || r == '\t' {
@@ -44,4 +45,24 @@ func IsLikelyBinary(sample []byte) bool {
 		}
 	}
 	return float64(suspicious)/float64(len(sample)) > 0.30
+}
+
+func trimIncompleteUTF8Tail(sample []byte) []byte {
+	n := len(sample)
+	if n == 0 {
+		return sample
+	}
+	limit := n - 4
+	if limit < 0 {
+		limit = 0
+	}
+	for i := n - 1; i >= limit; i-- {
+		if utf8.RuneStart(sample[i]) {
+			if !utf8.FullRune(sample[i:]) {
+				return sample[:i]
+			}
+			return sample
+		}
+	}
+	return sample
 }

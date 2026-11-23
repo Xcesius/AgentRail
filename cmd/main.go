@@ -65,7 +65,7 @@ func run(manager *workspace.Manager, args []string) map[string]any {
 		if len(globals.Args) != 0 {
 			return protocol.FailureWithDetails("json", protocol.CodeInvalidRequest, "--json does not accept CLI subcommands", protocol.ErrorDetails{"field": "--json", "reason": "unexpected_cli_args"}, nil)
 		}
-		payload, readErr := readStdin(true)
+		payload, readErr := readStdin(true, true)
 		if readErr != nil {
 			return failure("json", readErr, nil)
 		}
@@ -76,9 +76,12 @@ func run(manager *workspace.Manager, args []string) map[string]any {
 		if !stdinHasData() {
 			return protocol.FailureWithDetails("cli", protocol.CodeInvalidRequest, "missing command", protocol.ErrorDetails{"field": "action", "reason": "required"}, nil)
 		}
-		payload, readErr := readStdin(true)
+		payload, readErr := readStdin(true, false)
 		if readErr != nil {
 			return failure("json", readErr, nil)
+		}
+		if len(payload) == 0 {
+			return protocol.FailureWithDetails("cli", protocol.CodeInvalidRequest, "missing command", protocol.ErrorDetails{"field": "action", "reason": "required"}, nil)
 		}
 		return handleJSON(manager, globals.AllowOutside, payload)
 	}
@@ -156,17 +159,23 @@ func handleJSON(manager *workspace.Manager, allowOutsideFlag bool, payload []byt
 		if resolveErr != nil {
 			return respond(failure(action, resolveErr, nil))
 		}
-		result, readErr := readmod.ReadFile(resolved, readmod.Options{
+		readOpts := readmod.Options{
+			Context:     context.Background(),
 			DisplayPath: manager.DisplayPath(resolved),
 			StartLine:   req.StartLine,
 			EndLine:     req.EndLine,
 			MaxBytes:    req.MaxBytes,
-		})
+		}
+		if manager.IsWithinWorkspace(resolved) {
+			readOpts.WorkspaceRoot = manager.Root
+			readOpts.RelativePath = readOpts.DisplayPath
+		}
+		result, readErr := readmod.ReadFile(resolved, readOpts)
 		if readErr != nil {
 			return respond(failure(action, readErr, nil))
 		}
 		fields := map[string]any{
-			"path":            manager.DisplayPath(resolved),
+			"path":            readOpts.DisplayPath,
 			"content":         result.Content,
 			"file_token":      result.FileToken,
 			"start_line":      result.StartLine,
@@ -187,15 +196,13 @@ func handleJSON(manager *workspace.Manager, allowOutsideFlag bool, payload []byt
 		if resolveErr != nil {
 			return respond(failure(action, resolveErr, nil))
 		}
-		if revalidateErr := manager.RevalidateWritePath(resolved); revalidateErr != nil {
-			return respond(failure(action, revalidateErr, nil))
-		}
-		written, writeErr := writemod.WriteFileAtomicInRoot(manager.Root, manager.DisplayPath(resolved), []byte(*req.Content), req.CreateDirs)
+		display := manager.DisplayPath(resolved)
+		written, writeErr := writemod.WriteFileAtomicInRoot(manager.Root, display, []byte(*req.Content), req.CreateDirs)
 		if writeErr != nil {
 			return respond(failure(action, writeErr, nil))
 		}
 		return respond(protocol.Success(action, map[string]any{
-			"path":          manager.DisplayPath(resolved),
+			"path":          display,
 			"bytes_written": written,
 		}))
 	case "patch":
@@ -243,6 +250,8 @@ func handleJSON(manager *workspace.Manager, allowOutsideFlag bool, payload []byt
 		expectedFileTokens := map[string]string{}
 		if req.ExpectedFileToken != "" {
 			expectedFileTokens[generated.Path] = req.ExpectedFileToken
+		} else if generated.FileToken != "" {
+			expectedFileTokens[generated.Path] = generated.FileToken
 		}
 		applyResult, replaceErr := patchmod.Apply(manager, generated.Diff, patchmod.Options{
 			Atomic:             true,
@@ -311,7 +320,7 @@ func handleCLI(manager *workspace.Manager, globals globalOptions) map[string]any
 		}
 		return protocol.Success(cmd, map[string]any{"paths": page.Paths, "has_more": page.HasMore, "next_cursor": page.NextCursor})
 	case "search":
-		if len(args) < 1 {
+		if len(args) != 1 {
 			return protocol.FailureWithDetails(cmd, protocol.CodeInvalidRequest, "search requires <query>", protocol.ErrorDetails{"field": "query", "reason": "required"}, nil)
 		}
 		matches, err := searchmod.Search(context.Background(), manager, searchmod.Options{
@@ -334,12 +343,20 @@ func handleCLI(manager *workspace.Manager, globals globalOptions) map[string]any
 		if err != nil {
 			return failure(cmd, err, nil)
 		}
-		result, readErr := readmod.ReadFile(resolved, readmod.Options{DisplayPath: manager.DisplayPath(resolved)})
+		readOpts := readmod.Options{
+			Context:     context.Background(),
+			DisplayPath: manager.DisplayPath(resolved),
+		}
+		if manager.IsWithinWorkspace(resolved) {
+			readOpts.WorkspaceRoot = manager.Root
+			readOpts.RelativePath = readOpts.DisplayPath
+		}
+		result, readErr := readmod.ReadFile(resolved, readOpts)
 		if readErr != nil {
 			return failure(cmd, readErr, nil)
 		}
 		return protocol.Success(cmd, map[string]any{
-			"path":            manager.DisplayPath(resolved),
+			"path":            readOpts.DisplayPath,
 			"content":         result.Content,
 			"file_token":      result.FileToken,
 			"start_line":      result.StartLine,
@@ -352,7 +369,7 @@ func handleCLI(manager *workspace.Manager, globals globalOptions) map[string]any
 		if len(args) != 1 {
 			return protocol.FailureWithDetails(cmd, protocol.CodeInvalidRequest, "write requires <path>", protocol.ErrorDetails{"field": "path", "reason": "required"}, nil)
 		}
-		content, readErr := readStdin(true)
+		content, readErr := readStdin(true, false)
 		if readErr != nil {
 			return failure(cmd, readErr, nil)
 		}
@@ -360,15 +377,13 @@ func handleCLI(manager *workspace.Manager, globals globalOptions) map[string]any
 		if err != nil {
 			return failure(cmd, err, nil)
 		}
-		if revalidateErr := manager.RevalidateWritePath(resolved); revalidateErr != nil {
-			return failure(cmd, revalidateErr, nil)
-		}
-		written, writeErr := writemod.WriteFileAtomicInRoot(manager.Root, manager.DisplayPath(resolved), content, false)
+		display := manager.DisplayPath(resolved)
+		written, writeErr := writemod.WriteFileAtomicInRoot(manager.Root, display, content, false)
 		if writeErr != nil {
 			return failure(cmd, writeErr, nil)
 		}
 		return protocol.Success(cmd, map[string]any{
-			"path":          manager.DisplayPath(resolved),
+			"path":          display,
 			"bytes_written": written,
 		})
 	case "patch":
@@ -376,7 +391,7 @@ func handleCLI(manager *workspace.Manager, globals globalOptions) map[string]any
 		if parseErr != nil {
 			return failure(cmd, parseErr, patchBaseFields())
 		}
-		diff, readErr := readStdin(true)
+		diff, readErr := readStdin(true, false)
 		if readErr != nil {
 			return failure(cmd, readErr, patchBaseFields())
 		}
@@ -396,7 +411,7 @@ func handleCLI(manager *workspace.Manager, globals globalOptions) map[string]any
 		if parseErr != nil {
 			return failure(cmd, parseErr, buildPatchBaseFields("", ""))
 		}
-		content, readErr := readStdin(true)
+		content, readErr := readStdin(true, false)
 		if readErr != nil {
 			return failure(cmd, readErr, buildPatchBaseFields(path, ""))
 		}
@@ -410,7 +425,7 @@ func handleCLI(manager *workspace.Manager, globals globalOptions) map[string]any
 		if parseErr != nil {
 			return failure(cmd, parseErr, replaceBaseFields(""))
 		}
-		content, readErr := readStdin(true)
+		content, readErr := readStdin(true, false)
 		if readErr != nil {
 			return failure(cmd, readErr, replaceBaseFields(replaceOpts.Path))
 		}
@@ -422,10 +437,15 @@ func handleCLI(manager *workspace.Manager, globals globalOptions) map[string]any
 			return protocol.Success(cmd, replaceNoOpFields(generated))
 		}
 		createDirs := replaceOpts.CreateDirs
+		expectedFileTokens := map[string]string{}
+		if generated.FileToken != "" {
+			expectedFileTokens[generated.Path] = generated.FileToken
+		}
 		applyResult, replaceErr := patchmod.Apply(manager, generated.Diff, patchmod.Options{
-			Atomic:        true,
-			CreateDirs:    &createDirs,
-			ExactContents: map[string][]byte{generated.Path: content},
+			Atomic:             true,
+			ExpectedFileTokens: expectedFileTokens,
+			CreateDirs:         &createDirs,
+			ExactContents:      map[string][]byte{generated.Path: content},
 		})
 		fields := replaceFields(generated, applyResult)
 		if replaceErr != nil {
@@ -688,7 +708,7 @@ func replaceBaseFields(path string) map[string]any {
 func replaceFields(generated patchmod.GeneratedFilePatch, applyResult patchmod.ApplyResult) map[string]any {
 	fields := map[string]any{
 		"path":             generated.Path,
-		"changed":          generated.Changed,
+		"changed":          len(applyResult.FilesChanged) > 0,
 		"diff":             generated.Diff,
 		"repository_state": applyResult.RepositoryState,
 		"files_changed":    applyResult.FilesChanged,
@@ -895,12 +915,26 @@ func replaceSchemaFields() map[string]any {
 	}
 }
 
-func readStdin(required bool) ([]byte, error) {
-	if !stdinHasData() {
-		if required {
-			return nil, protocol.ErrDetails(protocol.CodeInvalidRequest, "stdin is required", protocol.ErrorDetails{"field": "stdin", "reason": "required"})
+func readStdin(required, allowTTY bool) ([]byte, error) {
+	info, statErr := os.Stdin.Stat()
+	if !allowTTY {
+		if statErr != nil || (info.Mode()&os.ModeCharDevice) != 0 {
+			if required {
+				return nil, protocol.ErrDetails(protocol.CodeInvalidRequest, "stdin is required", protocol.ErrorDetails{"field": "stdin", "reason": "required"})
+			}
+			return nil, nil
 		}
-		return nil, nil
+	}
+	if statErr == nil && info.Mode().IsRegular() {
+		if info.Size() >= maxStdinBytes {
+			return nil, protocol.ErrDetails(protocol.CodeTooLarge, "stdin payload exceeds limit", protocol.ErrorDetails{"field": "stdin", "limit_bytes": maxStdinBytes, "actual_bytes": info.Size()})
+		}
+		buf := make([]byte, info.Size())
+		n, err := io.ReadFull(os.Stdin, buf)
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			return nil, protocol.Err(protocol.CodeInvalidRequest, "unable to read stdin")
+		}
+		return buf[:n], nil
 	}
 	reader := io.LimitReader(os.Stdin, maxStdinBytes+1)
 	data, err := io.ReadAll(reader)

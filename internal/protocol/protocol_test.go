@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"fmt"
 	"regexp"
 	"sort"
 	"testing"
@@ -81,5 +82,41 @@ func TestResponsesIncludeEnvelopeFields(t *testing.T) {
 			}
 			seen[capability] = struct{}{}
 		}
+	}
+}
+
+func TestParseRequestRejectsCrossActionFields(t *testing.T) {
+	cases := []struct {
+		name      string
+		payload   string
+		wantField string
+	}{
+		{"singular token on patch", `{"action":"patch","diff":"x","expected_file_token":"sha256:abc"}`, "expected_file_token"},
+		{"plural tokens on replace", `{"action":"replace","path":"a.txt","content":"x","expected_file_tokens":{"a.txt":"sha256:abc"}}`, "expected_file_tokens"},
+		{"limit on read", `{"action":"read","path":"a.txt","limit":10}`, "limit"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseRequest([]byte(tc.payload))
+			if err == nil {
+				t.Fatalf("expected error for %s", tc.name)
+			}
+			te, ok := AsToolError(err)
+			if !ok || te.Code != CodeInvalidRequest {
+				t.Fatalf("expected invalid_request, got %v", err)
+			}
+			if te.Details["field"] != tc.wantField || te.Details["reason"] != "unknown_field" {
+				t.Fatalf("unexpected error details: %+v", te.Details)
+			}
+		})
+	}
+}
+
+func TestAsToolErrorUnwrapsWrappedErrors(t *testing.T) {
+	inner := Err(CodeNotFound, "missing")
+	wrapped := fmt.Errorf("outer: %w", inner)
+	te, ok := AsToolError(wrapped)
+	if !ok || te.Code != CodeNotFound {
+		t.Fatalf("expected wrapped ToolError to unwrap, got ok=%v te=%v", ok, te)
 	}
 }

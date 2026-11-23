@@ -258,3 +258,47 @@ func TestListFilesBoundedPagesMatchFullSortedEnumeration(t *testing.T) {
 		t.Fatalf("paged enumeration differs from full: paged=%v full=%v", paged, full)
 	}
 }
+
+func TestListFilesPageRejectsNegativeLimitAndValidatesCursorWhenLimitZero(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("a"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	manager, err := workspace.NewManagerFromRoot(root)
+	if err != nil {
+		t.Fatalf("NewManagerFromRoot: %v", err)
+	}
+
+	if _, err := ListFilesPage(root, manager, -1, ""); err == nil {
+		t.Fatal("expected negative limit to fail")
+	}
+	_, err = ListFilesPage(root, manager, 0, "not-a-cursor")
+	if err == nil {
+		t.Fatal("expected invalid cursor to fail even when limit=0")
+	}
+	te, ok := protocol.AsToolError(err)
+	if !ok || te.Code != protocol.CodeCursorInvalid {
+		t.Fatalf("expected cursor_invalid, got %v", err)
+	}
+}
+
+func TestCanPruneDirectory(t *testing.T) {
+	cases := []struct {
+		dir   string
+		after string
+		want  bool
+	}{
+		{"a-early", "a/b.txt", true},
+		{"a", "a.txt", false},
+		{"a", "a0.txt", true},
+		{"a", "a/b.txt", false},
+		{"dir-01", "dir-05/x.txt", true},
+		{"dir-05", "dir-05/x.txt", false},
+		{"dir-06", "dir-05/x.txt", false},
+	}
+	for _, tc := range cases {
+		if got := canPruneDirectory(tc.dir, tc.after); got != tc.want {
+			t.Fatalf("canPruneDirectory(%q, %q) = %v, want %v", tc.dir, tc.after, got, tc.want)
+		}
+	}
+}

@@ -267,3 +267,33 @@ func TestReadFileTokenStableAcrossPagesAndChangesAfterWrite(t *testing.T) {
 		t.Fatalf("expected token change after modification, got %q", updated.FileToken)
 	}
 }
+
+func TestReadRejectsNegativeStartLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sample.txt")
+	if err := os.WriteFile(path, []byte("line\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	_, err := ReadFile(path, Options{StartLine: -1})
+	if err == nil {
+		t.Fatal("expected negative start_line to fail")
+	}
+	te, ok := protocol.AsToolError(err)
+	if !ok || te.Code != protocol.CodeInvalidRequest {
+		t.Fatalf("expected invalid_request, got %v", err)
+	}
+}
+
+func TestReadAcceptsLargeMultiByteUTF8File(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cjk.txt")
+	content := strings.Repeat("中", 2000) + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	res, err := ReadFile(path, Options{})
+	if err != nil {
+		t.Fatalf("ReadFile failed on valid multi-byte UTF-8 file: %v", err)
+	}
+	if res.Content != content {
+		t.Fatalf("unexpected content length: got %d want %d", len(res.Content), len(content))
+	}
+}

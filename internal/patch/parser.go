@@ -197,14 +197,27 @@ func parseHunk(lines []string, start int) (Hunk, int, error) {
 		}
 	}
 
+	remaining := len(lines) - start - 1
+	if remaining < 0 {
+		remaining = 0
+	}
+	initialCap := remaining
+	if oldLines >= 0 && newLines >= 0 {
+		// Guard against overflow while avoiding O(H*L) quadratic allocation across many hunks.
+		if oldLines <= remaining && newLines <= remaining-oldLines {
+			initialCap = oldLines + newLines
+		}
+	}
+	if initialCap > 1024 {
+		initialCap = 1024
+	}
+
 	hunk := Hunk{
 		OldStart: oldStart,
 		OldLines: oldLines,
 		NewStart: newStart,
 		NewLines: newLines,
-		// Capacity is bounded by the actual request rather than caller-provided
-		// counts, which may be extremely large.
-		Lines: make([]HunkLine, 0, len(lines)-start-1),
+		Lines:    make([]HunkLine, 0, initialCap),
 	}
 
 	i := start + 1
@@ -215,9 +228,6 @@ func parseHunk(lines []string, start int) (Hunk, int, error) {
 	lastKind := byte(0)
 	for i < len(lines) {
 		line := lines[i]
-		if strings.HasPrefix(line, "@@ ") || strings.HasPrefix(line, "--- ") || strings.HasPrefix(line, "diff --git ") {
-			break
-		}
 		if strings.HasPrefix(line, `\ No newline at end of file`) {
 			switch lastKind {
 			case ' ':
@@ -230,6 +240,9 @@ func parseHunk(lines []string, start int) (Hunk, int, error) {
 			}
 			i++
 			continue
+		}
+		if oldCount == hunk.OldLines && newCount == hunk.NewLines {
+			break
 		}
 		if len(line) == 0 {
 			return Hunk{}, 0, protocol.Err(protocol.CodePatchFailed, "invalid empty hunk line")
@@ -245,6 +258,9 @@ func parseHunk(lines []string, start int) (Hunk, int, error) {
 		}
 		if kind == ' ' || kind == '+' {
 			newCount++
+		}
+		if oldCount > hunk.OldLines || newCount > hunk.NewLines {
+			return Hunk{}, 0, protocol.Err(protocol.CodePatchFailed, "hunk line counts do not match header")
 		}
 		i++
 	}
