@@ -90,7 +90,18 @@ jobs:
         run: go test -race -count=1 ./...
       - name: Benchmarks
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-        run: go test -run='^$' -bench='.' -benchmem -benchtime=2s ./internal/...
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -run='^$' -bench='.' -benchmem -benchtime=2s ./internal/... | tee "bench-${{ matrix.os }}.txt"
+      - name: Upload benchmark results
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: benchmarks-${{ matrix.os }}
+          path: bench-${{ matrix.os }}.txt
+          retention-days: 30
+          if-no-files-found: error
 
   fuzz:
     name: Fuzz (${{ matrix.target }})
@@ -117,3 +128,59 @@ jobs:
           FUZZ_TARGET: ${{ matrix.target }}
           FUZZ_TIME: ${{ github.event_name == 'schedule' && '2m' || '20s' }}
         run: go test -run='^$' -fuzz="^${FUZZ_TARGET}$" -fuzztime="$FUZZ_TIME" -parallel=2 ./internal/patch
+      - name: Upload fuzz crash corpus
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: internal/patch/testdata/fuzz
+          retention-days: 14
+          if-no-files-found: ignore
+
+  build-artifacts:
+    name: Build Release Artifacts
+    needs: [test, fuzz]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build cross-platform binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          TOOL_VERSION="0.0.0-dev+${SHORT_SHA}"
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" && "${GITHUB_REF_NAME:-}" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            TOOL_VERSION="${BASH_REMATCH[1]}"
+          fi
+          echo "Building AgentRail version: ${TOOL_VERSION}"
+
+          mkdir -p dist
+          LDFLAGS="-s -w -buildid= -X agentrail/internal/protocol.ToolVersion=${TOOL_VERSION}"
+
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "${LDFLAGS}" -o dist/agentrail-windows-amd64.exe ./cmd
+          CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -trimpath -ldflags "${LDFLAGS}" -o dist/agentrail-windows-arm64.exe ./cmd
+          CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -trimpath -ldflags "${LDFLAGS}" -o dist/agentrail-linux-amd64 ./cmd
+          CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -trimpath -ldflags "${LDFLAGS}" -o dist/agentrail-linux-arm64 ./cmd
+
+          # Smoke-test the built binary and verify ToolVersion stamping.
+          SMOKE_OUT="$(printf '{"action":"schema","target":"patch"}' | ./dist/agentrail-linux-amd64 --json)"
+          echo "${SMOKE_OUT}"
+          grep -q "\"tool_version\":\"${TOOL_VERSION}\"" <<< "${SMOKE_OUT}"
+          grep -q '"ok":true' <<< "${SMOKE_OUT}"
+
+          (cd dist && sha256sum agentrail-* > SHA256SUMS.txt)
+          cat dist/SHA256SUMS.txt
+      - name: Upload release binaries
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: agentrail-binaries
+          path: dist/
+          retention-days: 30
+          if-no-files-found: error
