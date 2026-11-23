@@ -152,20 +152,11 @@ func buildUnifiedDiff(displayPath, original string, originalExists bool, updated
 	}
 
 	const contextLines = 3
-	ctxStart := prefix - contextLines
-	if ctxStart < 0 {
-		ctxStart = 0
-	}
+	ctxStart := max(prefix-contextLines, 0)
 	oldChangeEnd := len(originalLines) - suffix
 	newChangeEnd := len(updatedLines) - suffix
-	oldEnd := oldChangeEnd + contextLines
-	if oldEnd > len(originalLines) {
-		oldEnd = len(originalLines)
-	}
-	newEnd := newChangeEnd + contextLines
-	if newEnd > len(updatedLines) {
-		newEnd = len(updatedLines)
-	}
+	oldEnd := min(oldChangeEnd+contextLines, len(originalLines))
+	newEnd := min(newChangeEnd+contextLines, len(updatedLines))
 
 	oldCount := oldEnd - ctxStart
 	newCount := newEnd - ctxStart

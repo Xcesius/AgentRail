@@ -138,8 +138,7 @@ func Run(options Options) (Result, error) {
 	}
 
 	if runErr != nil {
-		var exitErr *osexec.ExitError
-		if errors.As(runErr, &exitErr) {
+		if exitErr, ok := errors.AsType[*osexec.ExitError](runErr); ok {
 			result.ExitCode = exitErr.ExitCode()
 			return result, nil
 		}
@@ -361,9 +360,9 @@ type sharedOutputCapture struct {
 }
 
 type streamCaptureWriter struct {
-	capture        *sharedOutputCapture
-	stdout         bool
-	drainFastPath  atomic.Bool
+	capture       *sharedOutputCapture
+	stdout        bool
+	drainFastPath atomic.Bool
 }
 
 func newSharedOutputCapture(limit int64) *sharedOutputCapture {

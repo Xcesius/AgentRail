@@ -486,7 +486,7 @@ func parseGlobalFlags(args []string) (globalOptions, error) {
 	out := globalOptions{Args: args}
 	remaining := make([]string, 0, len(args))
 
-	for i := 0; i < len(args); i++ {
+	for i := range args {
 		a := args[i]
 		if a == "--json" {
 			out.ForceJSON = true

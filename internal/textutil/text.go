@@ -52,10 +52,7 @@ func trimIncompleteUTF8Tail(sample []byte) []byte {
 	if n == 0 {
 		return sample
 	}
-	limit := n - 4
-	if limit < 0 {
-		limit = 0
-	}
+	limit := max(n-4, 0)
 	for i := n - 1; i >= limit; i-- {
 		if utf8.RuneStart(sample[i]) {
 			if !utf8.FullRune(sample[i:]) {

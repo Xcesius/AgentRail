@@ -11,7 +11,7 @@ import (
 
 func BenchmarkFilesPaginationFullSweep(b *testing.B) {
 	root := b.TempDir()
-	for i := 0; i < 300; i++ {
+	for i := range 300 {
 		path := filepath.Join(root, fmt.Sprintf("dir-%02d", i%15), fmt.Sprintf("file-%03d.txt", i))
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			b.Fatalf("MkdirAll: %v", err)

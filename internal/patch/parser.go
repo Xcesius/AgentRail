@@ -197,10 +197,7 @@ func parseHunk(lines []string, start int) (Hunk, int, error) {
 		}
 	}
 
-	remaining := len(lines) - start - 1
-	if remaining < 0 {
-		remaining = 0
-	}
+	remaining := max(len(lines)-start-1, 0)
 	initialCap := remaining
 	if oldLines >= 0 && newLines >= 0 {
 		// Guard against overflow while avoiding O(H*L) quadratic allocation across many hunks.

@@ -160,10 +160,7 @@ func searchWithWorkerCount(ctx context.Context, manager *workspace.Manager, opti
 
 	workerCount := workerOverride
 	if workerCount <= 0 {
-		workerCount = runtime.NumCPU()
-		if workerCount < 2 {
-			workerCount = 2
-		}
+		workerCount = max(runtime.NumCPU(), 2)
 		if workerCount > maxSearchWorkers {
 			workerCount = maxSearchWorkers
 		}
@@ -180,9 +177,7 @@ func searchWithWorkerCount(ctx context.Context, manager *workspace.Manager, opti
 
 	var wg sync.WaitGroup
 	for i := 0; i < workerCount; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			var overflowBuf bytes.Buffer
 			for {
 				select {
@@ -215,7 +210,7 @@ func searchWithWorkerCount(ctx context.Context, manager *workspace.Manager, opti
 					matchesMu.Unlock()
 				}
 			}
-		}()
+		})
 	}
 
 queueLoop:
@@ -255,10 +250,7 @@ queueLoop:
 }
 
 func searchDeterministicWithLimit(ctx context.Context, targets []searchTarget, options Options, matcher *searchMatcher) ([]Match, error) {
-	capacity := options.Limit
-	if capacity > 128 {
-		capacity = 128
-	}
+	capacity := min(options.Limit, 128)
 	matches := make([]Match, 0, capacity)
 	var overflowBuf bytes.Buffer
 	for _, target := range targets {
@@ -553,7 +545,7 @@ func normalizeGlob(glob string) string {
 }
 
 func validateGlob(glob string) error {
-	for _, seg := range strings.Split(glob, "/") {
+	for seg := range strings.SplitSeq(glob, "/") {
 		if seg == "**" {
 			continue
 		}

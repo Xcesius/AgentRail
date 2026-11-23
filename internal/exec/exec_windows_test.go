@@ -52,7 +52,7 @@ func TestRunExecBlocksBreakawayFromJob(t *testing.T) {
 
 func TestRunExecFastExitStressCapturesOutputReliably(t *testing.T) {
 	envMap, _ := json.Marshal(map[string]string{"GO_WANT_WIN_HELPER_PROCESS": "1"})
-	for i := 0; i < 15; i++ {
+	for i := range 15 {
 		token := fmt.Sprintf("fast-output-%02d", i)
 		argv := []string{os.Args[0], "-test.run=TestWindowsHelperProcess", "--", "fast-print=" + token}
 		res, err := Run(Options{Argv: argv, Env: envMap})

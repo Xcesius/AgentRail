@@ -57,9 +57,7 @@ func TestWriteFileAtomicInRootConcurrentJunctionSwapNeverEscapes(t *testing.T) {
 	var writeSuccesses atomic.Int64
 	var writeErrors atomic.Int64
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		<-startCh
 		for !stop.Load() {
 			_ = os.RemoveAll(subDir)
@@ -70,10 +68,10 @@ func TestWriteFileAtomicInRootConcurrentJunctionSwapNeverEscapes(t *testing.T) {
 			_ = os.Remove(subDir)
 			_ = os.MkdirAll(subDir, 0o755)
 		}
-	}()
+	})
 
 	close(startCh)
-	for i := 0; i < 80; i++ {
+	for i := range 80 {
 		if _, err := WriteFileAtomicInRoot(root, "sub/target.txt", []byte(fmt.Sprintf("payload-%d\n", i)), false); err == nil {
 			writeSuccesses.Add(1)
 		} else {

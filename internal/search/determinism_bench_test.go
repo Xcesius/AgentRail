@@ -16,7 +16,7 @@ import (
 func buildTestCorpus(tb testing.TB, numFiles, linesPerFile int) (string, *workspace.Manager) {
 	tb.Helper()
 	root := tb.TempDir()
-	for i := 0; i < numFiles; i++ {
+	for i := range numFiles {
 		ext := ".txt"
 		if i%5 == 0 {
 			ext = ".go"
@@ -78,7 +78,7 @@ func TestDeterministicParallelSearchIdenticalAcrossWorkerCounts(t *testing.T) {
 			}
 
 			for _, workers := range []int{1, 2, 4, 8} {
-				for rep := 0; rep < 8; rep++ {
+				for rep := range 8 {
 					got, err := searchWithWorkerCount(context.Background(), manager, cfg.opts, workers)
 					if err != nil {
 						t.Fatalf("workers=%d rep=%d err=%v", workers, rep, err)

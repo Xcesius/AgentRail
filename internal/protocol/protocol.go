@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"runtime"
 	"sort"
 	"strings"
@@ -125,9 +126,7 @@ func validateActionFields(action string, data []byte) error {
 
 func Success(action string, fields map[string]any) map[string]any {
 	resp := baseResponse(true, action)
-	for key, value := range fields {
-		resp[key] = value
-	}
+	maps.Copy(resp, fields)
 	return resp
 }
 
@@ -138,9 +137,7 @@ func Failure(action, code, message string, fields map[string]any) map[string]any
 func FailureWithDetails(action, code, message string, details ErrorDetails, fields map[string]any) map[string]any {
 	resp := baseResponse(false, action)
 	resp["error"] = ErrorPayload{Code: code, Message: message, Details: cloneDetails(details)}
-	for key, value := range fields {
-		resp[key] = value
-	}
+	maps.Copy(resp, fields)
 	return resp
 }
 
@@ -186,8 +183,7 @@ func classifyRequestDecodeError(err error) error {
 		return ErrDetails(CodeInvalidRequest, "invalid JSON request", ErrorDetails{"reason": "empty"})
 	}
 
-	var typeErr *json.UnmarshalTypeError
-	if errors.As(err, &typeErr) {
+	if typeErr, ok := errors.AsType[*json.UnmarshalTypeError](err); ok {
 		field := requestFieldName(typeErr.Field)
 		message := "invalid JSON request"
 		details := ErrorDetails{"reason": "invalid_type"}
@@ -197,14 +193,13 @@ func classifyRequestDecodeError(err error) error {
 		return ErrDetails(CodeInvalidRequest, message, details)
 	}
 
-	var syntaxErr *json.SyntaxError
-	if errors.As(err, &syntaxErr) {
+	if _, ok := errors.AsType[*json.SyntaxError](err); ok {
 		return ErrDetails(CodeInvalidRequest, "invalid JSON request", ErrorDetails{"reason": "syntax"})
 	}
 
 	message := err.Error()
-	if strings.HasPrefix(message, "json: unknown field ") {
-		field := strings.Trim(strings.TrimPrefix(message, "json: unknown field "), "\"")
+	if after, ok := strings.CutPrefix(message, "json: unknown field "); ok {
+		field := strings.Trim(after, "\"")
 		return ErrDetails(CodeInvalidRequest, "invalid JSON request", ErrorDetails{"field": field, "reason": "unknown_field"})
 	}
 

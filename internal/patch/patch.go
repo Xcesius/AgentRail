@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"agentrail/internal/filemeta"
@@ -401,8 +402,8 @@ func verifyPlanSnapshot(plan filePlan) error {
 
 func rollbackCommittedPlans(committed []filePlan) []error {
 	errs := make([]error, 0, len(committed))
-	for i := len(committed) - 1; i >= 0; i-- {
-		if err := restoreOriginal(committed[i]); err != nil {
+	for _, c := range slices.Backward(committed) {
+		if err := restoreOriginal(c); err != nil {
 			errs = append(errs, err)
 		}
 	}

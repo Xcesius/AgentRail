@@ -3,6 +3,7 @@ package protocol
 import (
 	"errors"
 	"fmt"
+	"maps"
 )
 
 const (
@@ -53,8 +54,7 @@ func AsToolError(err error) (*ToolError, bool) {
 	if err == nil {
 		return nil, false
 	}
-	var te *ToolError
-	if errors.As(err, &te) {
+	if te, ok := errors.AsType[*ToolError](err); ok {
 		return te, true
 	}
 	return nil, false
@@ -65,8 +65,6 @@ func cloneDetails(details ErrorDetails) ErrorDetails {
 		return nil
 	}
 	cloned := make(ErrorDetails, len(details))
-	for key, value := range details {
-		cloned[key] = value
-	}
+	maps.Copy(cloned, details)
 	return cloned
 }

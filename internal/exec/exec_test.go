@@ -289,15 +289,15 @@ func TestHelperProcess(t *testing.T) {
 
 	helperArgs := os.Args[index+1:]
 	for _, arg := range helperArgs {
-		if strings.HasPrefix(arg, "sleep-ms=") {
-			msRaw := strings.TrimPrefix(arg, "sleep-ms=")
+		if after, ok := strings.CutPrefix(arg, "sleep-ms="); ok {
+			msRaw := after
 			ms, _ := strconv.Atoi(msRaw)
 			time.Sleep(time.Duration(ms) * time.Millisecond)
 			fmt.Print("slept")
 			os.Exit(0)
 		}
-		if strings.HasPrefix(arg, "write-marker-after=") {
-			parts := strings.SplitN(strings.TrimPrefix(arg, "write-marker-after="), ":", 2)
+		if after, ok := strings.CutPrefix(arg, "write-marker-after="); ok {
+			parts := strings.SplitN(after, ":", 2)
 			if len(parts) != 2 {
 				fmt.Fprint(os.Stderr, "invalid write-marker-after")
 				os.Exit(2)
@@ -310,8 +310,8 @@ func TestHelperProcess(t *testing.T) {
 			}
 			os.Exit(0)
 		}
-		if strings.HasPrefix(arg, "spawn-marker=") {
-			markerPath := strings.TrimPrefix(arg, "spawn-marker=")
+		if after, ok := strings.CutPrefix(arg, "spawn-marker="); ok {
+			markerPath := after
 			child := osexec.Command(os.Args[0], "-test.run=TestHelperProcess", "--", "write-marker-after=300:"+markerPath)
 			child.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")
 			if err := child.Start(); err != nil {
@@ -323,12 +323,12 @@ func TestHelperProcess(t *testing.T) {
 		}
 	}
 	for _, arg := range helperArgs {
-		if strings.HasPrefix(arg, "stdout-bytes=") {
-			n, _ := strconv.Atoi(strings.TrimPrefix(arg, "stdout-bytes="))
+		if after, ok := strings.CutPrefix(arg, "stdout-bytes="); ok {
+			n, _ := strconv.Atoi(after)
 			fmt.Fprint(os.Stdout, strings.Repeat("o", n))
 		}
-		if strings.HasPrefix(arg, "stderr-bytes=") {
-			n, _ := strconv.Atoi(strings.TrimPrefix(arg, "stderr-bytes="))
+		if after, ok := strings.CutPrefix(arg, "stderr-bytes="); ok {
+			n, _ := strconv.Atoi(after)
 			fmt.Fprint(os.Stderr, strings.Repeat("e", n))
 		}
 	}
