@@ -86,6 +86,88 @@ func FuzzBuildAndApplyRoundTrip(f *testing.F) {
 	})
 }
 
+func FuzzBuildAndApplyCRLF(f *testing.F) {
+	type seed struct{ orig, desired string }
+	seeds := []seed{
+		{"one\r\ntwo\r\n", "one\r\nTWO\r\n"},
+		{"-- old\r\nSELECT 1;\r\n", "-- new\r\nSELECT 1;\r\n"},
+		{"a\r\nb\r\n", "a\r\nb"},
+		{"a\r\nb", "a\r\nb\r\n"},
+		{"a\r\nb\r\nc\r\n", "a\r\nb"},
+		{"a\r\nb", "a\r\nb\r\nc"},
+		{"0\r\n", "\r\n0"},
+		{"0\r\n0", "0"},
+		{"Grüße\r\n世界\r\n", "Grüße\r\n🚀\r\n"},
+	}
+	for _, s := range seeds {
+		f.Add(s.orig, s.desired)
+	}
+	f.Fuzz(func(t *testing.T, rawOrig, rawDesired string) {
+		cleanLF := func(s string) string {
+			s = strings.ReplaceAll(s, "\x00", "")
+			s = strings.ReplaceAll(s, "\r\n", "\n")
+			s = strings.ReplaceAll(s, "\r", "")
+			return s
+		}
+		origLF := cleanLF(rawOrig)
+		desiredLF := cleanLF(rawDesired)
+		orig := strings.ReplaceAll(origLF, "\n", "\r\n")
+		desired := strings.ReplaceAll(desiredLF, "\n", "\r\n")
+		// Require at least one CRLF in orig so preferredLineEnding is unambiguously CRLF.
+		if orig == desired || !strings.Contains(orig, "\r\n") {
+			return
+		}
+
+		diff := buildUnifiedDiff("target.txt", origLF, true, desiredLF)
+		parsed, err := Parse(diff)
+		if err != nil {
+			t.Fatalf("Parse failed on CRLF diff:\norig=%q\ndesired=%q\ndiff=%q\nerr=%v", orig, desired, diff, err)
+		}
+		got, _, err := applyToContent(orig, parsed.Files[0])
+		if err != nil {
+			t.Fatalf("applyToContent failed on CRLF:\norig=%q\ndesired=%q\ndiff=%q\nerr=%v", orig, desired, diff, err)
+		}
+		if got != desired {
+			t.Fatalf("CRLF round-trip mismatch:\norig=%q\ndesired=%q\ngot=%q\ndiff=%q", orig, desired, got, diff)
+		}
+	})
+}
+
+func TestPatchCRLFAndMixedEndingsRoundTrip(t *testing.T) {
+	cases := []struct {
+		name    string
+		orig    string
+		desired string
+	}{
+		{
+			name:    "localized edit preserves LF on changed line and CRLF elsewhere",
+			orig:    "first\r\nsecond\nthird\r\nfourth",
+			desired: "first\r\nSECOND\nthird\r\nfourth",
+		},
+		{
+			name:    "append after no-newline EOF preserves untouched LF and uses dominant CRLF",
+			orig:    "first\r\nsecond\nthird\r\nfourth",
+			desired: "first\r\nsecond\nthird\r\nfourth\r\nfifth",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			diff := buildUnifiedDiff("mixed.txt", normalizePatchContent(tc.orig), true, normalizePatchContent(tc.desired))
+			parsed, err := Parse(diff)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			got, _, err := applyToContent(tc.orig, parsed.Files[0])
+			if err != nil {
+				t.Fatalf("applyToContent: %v", err)
+			}
+			if got != tc.desired {
+				t.Fatalf("mixed ending mismatch:\ngot =%q\nwant=%q\ndiff=%q", got, tc.desired, diff)
+			}
+		})
+	}
+}
+
 func TestAtomicMultiFileRollbackMixedOpsRestoresExactState(t *testing.T) {
 	root := t.TempDir()
 	manager, err := workspace.NewManagerFromRoot(root)

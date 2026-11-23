@@ -330,6 +330,13 @@ func normalizeWindowsPrefix(candidate string) (string, error) {
 		return "", protocol.ErrDetails(protocol.CodePathDenied, "Windows device paths are not allowed", protocol.ErrorDetails{"path": filepath.ToSlash(candidate), "policy": "device_path"})
 	case strings.HasPrefix(slashNorm, `\\?\`):
 		rest := slashNorm[4:]
+		if len(rest) > 4 && strings.EqualFold(rest[:4], `UNC\`) {
+			uncTarget := rest[4:]
+			if idx := strings.IndexByte(uncTarget, '\\'); idx > 0 && idx+1 < len(uncTarget) {
+				return `\\` + uncTarget, nil
+			}
+			return "", protocol.ErrDetails(protocol.CodePathDenied, "Windows device paths are not allowed", protocol.ErrorDetails{"path": filepath.ToSlash(candidate), "policy": "device_path"})
+		}
 		if len(rest) >= 3 && isASCIIAlpha(rest[0]) && rest[1] == ':' && rest[2] == '\\' {
 			return rest, nil
 		}

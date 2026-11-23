@@ -248,3 +248,24 @@ func TestIsDeniedPathIgnoresWorkspaceAncestors(t *testing.T) {
 		t.Fatal("expected nested node_modules inside workspace to remain denied")
 	}
 }
+
+func TestNormalizeWindowsPrefixHandlesUNCAndRejectsDevices(t *testing.T) {
+	got, err := normalizeWindowsPrefix(`\\?\UNC\fileserver\share\repo\file.go`)
+	if err != nil {
+		t.Fatalf("normalizeWindowsPrefix UNC failed: %v", err)
+	}
+	if got != `\\fileserver\share\repo\file.go` {
+		t.Fatalf("unexpected UNC normalization: got %q", got)
+	}
+
+	got, err = normalizeWindowsPrefix(`\\?\C:\Users\dev\repo`)
+	if err != nil || got != `C:\Users\dev\repo` {
+		t.Fatalf("unexpected drive normalization: got %q err=%v", got, err)
+	}
+
+	for _, bad := range []string{`\\.\PhysicalDrive0`, `\??\C:\Windows`, `\\?\Volume{1234}\foo`, `\\?\UNC\serveronly`} {
+		if _, err := normalizeWindowsPrefix(bad); err == nil {
+			t.Fatalf("expected device/malformed prefix %q to fail", bad)
+		}
+	}
+}

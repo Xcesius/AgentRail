@@ -140,7 +140,7 @@ func (j *jobObject) AssignAndResume(pid int) error {
 func resumeProcess(pid int, processHandle syscall.Handle) error {
 	if err := procNtResumeProcess.Find(); err == nil {
 		status, _, _ := procNtResumeProcess.Call(uintptr(processHandle))
-		if status == 0 {
+		if uint32(status) == 0 {
 			return nil
 		}
 	}
@@ -169,7 +169,7 @@ func resumeProcessThreadsWin32(pid uint32) error {
 			}
 			prevCount, _, resErr := procResumeThread.Call(th)
 			_ = closeHandle(syscall.Handle(th))
-			if prevCount == ^uintptr(0) {
+			if uint32(prevCount) == ^uint32(0) {
 				return fmt.Errorf("ResumeThread: %v", resErr)
 			}
 			resumed++

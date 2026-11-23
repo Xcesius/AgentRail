@@ -51,25 +51,41 @@ func TestWriteFileAtomicInRootConcurrentJunctionSwapNeverEscapes(t *testing.T) {
 		t.Fatalf("MkdirAll: %v", err)
 	}
 
+	startCh := make(chan struct{})
 	var stop atomic.Bool
+	var junctionSwaps atomic.Int64
+	var writeSuccesses atomic.Int64
+	var writeErrors atomic.Int64
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		<-startCh
 		for !stop.Load() {
 			_ = os.RemoveAll(subDir)
 			cmd := osexec.Command("cmd", "/c", "mklink", "/J", subDir, outside)
-			_ = cmd.Run()
+			if err := cmd.Run(); err == nil {
+				junctionSwaps.Add(1)
+			}
 			_ = os.Remove(subDir)
 			_ = os.MkdirAll(subDir, 0o755)
 		}
 	}()
 
-	for i := 0; i < 60; i++ {
-		_, _ = WriteFileAtomicInRoot(root, "sub/target.txt", []byte(fmt.Sprintf("payload-%d\n", i)), false)
+	close(startCh)
+	for i := 0; i < 80; i++ {
+		if _, err := WriteFileAtomicInRoot(root, "sub/target.txt", []byte(fmt.Sprintf("payload-%d\n", i)), false); err == nil {
+			writeSuccesses.Add(1)
+		} else {
+			writeErrors.Add(1)
+		}
 	}
 	stop.Store(true)
 	wg.Wait()
+
+	if junctionSwaps.Load() == 0 {
+		t.Fatalf("expected at least one junction swap during concurrent race (writes ok=%d err=%d)", writeSuccesses.Load(), writeErrors.Load())
+	}
 
 	entries, err := os.ReadDir(outside)
 	if err != nil {
@@ -77,6 +93,78 @@ func TestWriteFileAtomicInRootConcurrentJunctionSwapNeverEscapes(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("concurrent junction swap leaked files outside workspace: %+v", entries)
+	}
+}
+
+func TestRenameInDirRootFallbackEnforcesRootContainment(t *testing.T) {
+	rootDir := t.TempDir()
+	outsideDir := t.TempDir()
+	subDir := filepath.Join(rootDir, "sub")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	rootHandle, err := os.OpenRoot(rootDir)
+	if err != nil {
+		t.Fatalf("OpenRoot(root): %v", err)
+	}
+	defer rootHandle.Close()
+
+	// 1. Forced fallback inside root must succeed for create and replace.
+	inSubHandle, err := rootHandle.OpenRoot("sub")
+	if err != nil {
+		t.Fatalf("OpenRoot(sub): %v", err)
+	}
+	defer inSubHandle.Close()
+
+	if err := os.WriteFile(filepath.Join(subDir, ".tmp1"), []byte("v1"), 0o644); err != nil {
+		t.Fatalf("WriteFile(.tmp1): %v", err)
+	}
+	if err := renameInDirRootFallback(rootHandle, inSubHandle, ".tmp1", "target.txt", errorInvalidHandle); err != nil {
+		t.Fatalf("expected in-root fallback create to succeed, got %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(subDir, ".tmp2"), []byte("v2"), 0o644); err != nil {
+		t.Fatalf("WriteFile(.tmp2): %v", err)
+	}
+	if err := renameInDirRootFallback(rootHandle, inSubHandle, ".tmp2", "target.txt", errorInvalidHandle); err != nil {
+		t.Fatalf("expected in-root fallback replace to succeed, got %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(subDir, "target.txt")); err != nil || string(got) != "v2" {
+		t.Fatalf("unexpected fallback target content: got=%q err=%v", string(got), err)
+	}
+
+	// 2. Forced fallback with a dirRoot outside root must be rejected without writing outside.
+	outsideHandle, err := os.OpenRoot(outsideDir)
+	if err != nil {
+		t.Fatalf("OpenRoot(outside): %v", err)
+	}
+	defer outsideHandle.Close()
+
+	if err := os.WriteFile(filepath.Join(outsideDir, ".tmp-out"), []byte("escape"), 0o644); err != nil {
+		t.Fatalf("WriteFile(.tmp-out): %v", err)
+	}
+	if err := renameInDirRootFallback(rootHandle, outsideHandle, ".tmp-out", "escaped.txt", errorInvalidHandle); err == nil {
+		t.Fatal("expected out-of-root fallback to fail containment check")
+	}
+	if _, err := os.Stat(filepath.Join(outsideDir, "escaped.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("out-of-root fallback unexpectedly created escaped.txt: %v", err)
+	}
+}
+
+func TestStripWindowsExtendedPrefixHandlesUNCAndDrivePaths(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{`\\?\C:\Users\dev\repo`, `C:\Users\dev\repo`},
+		{`\\?\UNC\fileserver\share\repo`, `\\fileserver\share\repo`},
+		{`\\?\unc\fileserver\share\repo`, `\\fileserver\share\repo`},
+		{`C:\plain\path`, `C:\plain\path`},
+	}
+	for _, tc := range cases {
+		if got := stripWindowsExtendedPrefix(tc.in); got != tc.want {
+			t.Fatalf("stripWindowsExtendedPrefix(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
 
@@ -91,6 +179,8 @@ func TestIsPathWithinWindowsRoot(t *testing.T) {
 		{`C:\outside`, `C:\ws`, false},
 		{`C:\sub`, `C:\`, true},
 		{`D:\ws\sub`, `C:\ws`, false},
+		{`\\server\share\repo\sub`, `\\server\share\repo`, true},
+		{`\\server\share\other`, `\\server\share\repo`, false},
 	}
 	for _, tc := range cases {
 		if got := isPathWithinWindowsRoot(tc.dir, tc.root); got != tc.want {
