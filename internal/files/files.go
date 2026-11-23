@@ -44,6 +44,7 @@ func ListFilesPage(root string, manager *workspace.Manager, limit int, cursor st
 	if limit < 0 {
 		return Page{}, protocol.ErrDetails(protocol.CodeInvalidRequest, "limit must be >= 0", protocol.ErrorDetails{"field": "limit", "reason": "negative"})
 	}
+	root = normalizeRootPath(root)
 	if limit > 0 || cursor != "" {
 		return listFilesBoundedPage(root, manager, limit, cursor)
 	}
@@ -262,8 +263,18 @@ func encodeCursor(rootDisplay, after string) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(data), nil
 }
 
+func normalizeRootPath(root string) string {
+	clean := filepath.Clean(root)
+	if runtime.GOOS == "windows" && strings.IndexByte(clean, '~') >= 0 {
+		if resolved, err := filepath.EvalSymlinks(clean); err == nil {
+			return filepath.Clean(resolved)
+		}
+	}
+	return clean
+}
+
 func canonicalCursorRoot(root string) string {
-	clean := filepath.ToSlash(filepath.Clean(root))
+	clean := filepath.ToSlash(normalizeRootPath(root))
 	if runtime.GOOS == "windows" && len(clean) >= 2 && clean[1] == ':' {
 		clean = strings.ToUpper(clean[:1]) + clean[1:]
 	}

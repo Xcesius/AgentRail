@@ -114,6 +114,10 @@ func searchWithWorkerCount(ctx context.Context, manager *workspace.Manager, opti
 	}
 	if options.Root == "" {
 		options.Root = manager.Root
+	} else if runtime.GOOS == "windows" && strings.IndexByte(options.Root, '~') >= 0 {
+		if resolved, err := filepath.EvalSymlinks(options.Root); err == nil {
+			options.Root = filepath.Clean(resolved)
+		}
 	}
 	if options.MaxFileBytes < 0 {
 		return nil, protocol.ErrDetails(protocol.CodeInvalidRequest, "max_file_bytes must be >= 0", protocol.ErrorDetails{"field": "max_file_bytes", "reason": "negative"})

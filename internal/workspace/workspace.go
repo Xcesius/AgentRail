@@ -177,8 +177,17 @@ func (m *Manager) ResolveExecCWD(input string) (string, error) {
 }
 
 func (m *Manager) IsWithinWorkspace(path string) bool {
-	_, within := m.relativeIfWithin(filepath.Clean(path))
-	return within
+	clean := filepath.Clean(path)
+	if _, within := m.relativeIfWithin(clean); within {
+		return true
+	}
+	if runtime.GOOS == "windows" && strings.IndexByte(clean, '~') >= 0 {
+		if canonical, err := canonicalizePath(clean); err == nil {
+			_, within := m.relativeIfWithin(canonical)
+			return within
+		}
+	}
+	return false
 }
 
 func (m *Manager) DisplayPath(path string) string {
@@ -188,6 +197,17 @@ func (m *Manager) DisplayPath(path string) string {
 			return "."
 		}
 		return filepath.ToSlash(rel)
+	}
+	if runtime.GOOS == "windows" && strings.IndexByte(clean, '~') >= 0 {
+		if canonical, err := canonicalizePath(clean); err == nil {
+			clean = canonical
+			if rel, within := m.relativeIfWithin(clean); within {
+				if rel == "" || rel == "." {
+					return "."
+				}
+				return filepath.ToSlash(rel)
+			}
+		}
 	}
 	return canonicalAbsoluteDisplay(clean)
 }
