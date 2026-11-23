@@ -10,7 +10,7 @@ Normative keywords are interpreted as: **MUST**, **MUST NOT**, **SHOULD**, **MAY
 - The tool **MUST NOT** mix prose with stdout JSON.
 - Human diagnostics **MAY** be written to stderr.
 - JSON mode (`--json` or auto-detected stdin JSON) **MUST** receive exactly one JSON object.
-- Unknown JSON fields **MUST** fail with `invalid_request`.
+- Unknown JSON fields (including fields belonging only to other actions) **MUST** fail with `invalid_request`.
 
 ## 2. Common Envelope
 
@@ -115,11 +115,12 @@ Path handling rules:
 - Existing paths **MUST** be resolved through symlinks.
 - Non-existing paths **MUST** resolve the nearest existing ancestor through symlinks, then append remaining segments.
 - Workspace mutations **MUST** use handle-rooted operations so a concurrent symlink or reparse-point change cannot escape the workspace after validation.
-- Volume-relative Windows paths such as `C:foo` **MUST NOT** be accepted.
+- Volume-relative Windows paths such as `C:foo` and Windows device paths (`\\.\`, `\??\`, and non-drive/non-UNC `\\?\` paths such as `\\?\Volume{...}`) **MUST NOT** be accepted.
+- Extended-length Windows DOS (`\\?\<drive>:\...`) and UNC (`\\?\UNC\server\share\...`) prefixes are normalized before policy evaluation, and Windows 8.3 short paths are canonicalized.
 
 Denied paths:
 
-- `.agentrail`, `.git`, and `node_modules` anywhere under a candidate path are denied.
+- `.agentrail`, `.git`, and `node_modules` anywhere under a candidate path are denied (evaluated on workspace-relative segments for in-workspace paths so workspaces nested beneath such an ancestor remain usable).
 - Windows system directories discovered from the process environment, system drive, and workspace drive (`Windows`, `Program Files`, `Program Files (x86)`, and `ProgramData`) are denied unless that path is itself the workspace root.
 
 Workspace boundaries:
@@ -188,7 +189,8 @@ Success fields:
 Rules:
 
 - Resolved `path` **MUST** be a directory.
-- `limit <= 0` or omitted returns the full list for compatibility.
+- Negative `limit` values **MUST** return `invalid_request`.
+- `limit == 0` or omitted returns all remaining matching paths (starting strictly after `cursor` when `cursor` is provided, or the full list when `cursor` is omitted).
 - New clients **SHOULD** send `limit`.
 - `cursor` is opaque and currently encodes base64url JSON with fields `{v, root, after}`.
 - `root` is the canonical resolved root path for the enumeration, expressed as an absolute slash path with uppercase drive letter on Windows.
@@ -218,7 +220,9 @@ Success fields:
 
 Rules:
 
-- `col` is a 1-based byte index.
+- `col` is a 1-based byte index in the original line.
+- Empty `query` (`""`) **MUST** return `invalid_request`; whitespace-only queries are permitted.
+- `glob` is matched cross-platform against `/`-normalized display paths (backslashes in `glob` are normalized to `/`) and supports recursive `**` segments.
 - Binary files are skipped silently.
 - `preview` is the matched line truncated to the implementation preview limit.
 - If `limit > 0`, returned matches **MUST NOT** exceed `limit`.
@@ -299,7 +303,7 @@ Success fields:
 Rules:
 
 - `build_patch` **MUST** be non-mutating.
-- `build_patch` **MUST** read current target content and generate a single-file unified diff.
+- `build_patch` **MUST** read current target content and generate a compact single-file unified diff with surrounding context.
 - For unchanged existing content, `changed=false` and `diff=""`.
 - For missing files, `file_token` **MUST** be empty.
 
@@ -328,7 +332,8 @@ Rules:
 - `replace` **MUST** generate a single-file unified diff from current target content and apply it atomically.
 - `replace` **MUST** write the exact requested content bytes, including line-ending-only changes.
 - `replace` **MUST** be limited to create-or-overwrite of one target path; delete remains a `patch` concern.
-- `expected_file_token`, when provided, **MUST** be compared against the current target file token before mutation.
+- `expected_file_token`, when provided, **MUST** be compared against the current target file token before mutation; when omitted on an existing file, the snapshot token read during diff generation is revalidated before commit.
+- On failure where no repository mutation persisted, `changed` **MUST** be `false`.
 - Parent directories **MUST NOT** be created unless `create_dirs=true`.
 
 ## `patch`
@@ -363,6 +368,7 @@ Rules:
 
 - Accepted operations are modify, create, and delete.
 - Rename and copy metadata **MUST** fail.
+- Binary target files **MUST** fail with `binary_file`.
 - Hunk context and deletions **MUST** match strictly.
 - Result entries include `path`, `ok`, `changed`, `hunks_applied`, and optional `error`, `error_code`, `error_details`.
 - Successful no-op patch semantics:
@@ -396,7 +402,7 @@ When `atomic=true`:
 - Multiple file sections resolving to the same canonical target **MUST** fail validation before any write.
 - Any pre-commit validation failure **MUST** perform zero repository writes and **MUST** return `repository_state="unchanged"`.
 - Commit uses staged temp writes plus rollback metadata. This is logical atomicity with rollback, not a filesystem transaction.
-- If commit fails and rollback fully restores prior state, the response **MUST** use `commit_failed` and `repository_state="unchanged"`.
+- If commit fails and rollback fully restores prior state, the response **MUST** use `commit_failed`, `repository_state="unchanged"`, `files_changed=[]`, and `hunks_applied=0`.
 - If rollback fails and a changed subset is known, the response **MUST** use `rollback_failed` and `repository_state="partially_changed"`.
 - If rollback fails and final state cannot be proven, the response **MUST** use `rollback_failed` and `repository_state="ambiguous"`.
 - Once file-level processing has begun, `results` **MUST** be included even when `ok=false`.
@@ -428,7 +434,7 @@ Rules:
 - `cwd` **MUST** pass workspace validation.
 - `env` object means merge with the process environment.
 - On Windows, object-form environment merging **MUST** treat variable names case-insensitively.
-- `env` array of `KEY=VALUE` strings means full replacement environment.
+- `env` array of `KEY=VALUE` strings means full replacement environment (including `[]` for an empty environment).
 - When `env` is omitted or an object, inherited temp/cache variables are rewritten to workspace-local `.agentrail` runtime paths before caller object overrides are applied.
 - Workspace-local exec defaults include `TMP`, `TEMP`, `TMPDIR`, `GOCACHE`, `GOTMPDIR`, `APPDATA`, `LOCALAPPDATA`, `XDG_CACHE_HOME`, `npm_config_cache`, `PIP_CACHE_DIR`, `CARGO_HOME`, and `CARGO_TARGET_DIR`.
 - `env` array requests remain exact full replacements and do not receive workspace-local defaults.
@@ -450,7 +456,7 @@ Rules:
 
 - Timeout returns `timeout`, `exit_code=-1`, and any partial captured output.
 - `timeout_ms` values above `9223372036854` **MUST** return `invalid_request` rather than overflow the runtime duration.
-- On supported Windows builds, `exec_process_tree_kill` means descendant-tree termination is guaranteed on timeout or cancel via Job Object kill-on-close semantics.
+- On supported Windows builds, `exec_process_tree_kill` means the child is started suspended, assigned to a kill-on-close Job Object (with breakaway disallowed) before resuming, and the entire descendant tree is terminated on timeout or cancel.
 - If a future non-Windows build cannot provide the same guarantee, it **MUST NOT** advertise `exec_process_tree_kill`.
 
 ## 7. Malformed and Edge Cases

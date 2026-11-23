@@ -15,7 +15,7 @@ Required behavior:
 - Use `build_patch` when you need AgentRail to generate a valid single-file unified diff without mutating the repo.
 - Use raw `patch` for advanced/manual diffs and multi-file edits.
 - For multi-file edits, prefer `atomic=true` unless partial apply is intentionally acceptable.
-- Include `expected_file_tokens` when patching files that were previously read.
+- Include `expected_file_tokens` (plural map) on `patch` and `expected_file_token` (singular string) on `replace` / `build_patch` when depending on a previously read file state; cross-action field mixups fail with `invalid_request`.
 - Use `write` for direct file writes when you intentionally do not need diff generation.
 - Use `exec -- <argv...>` for builds, tests, and direct program execution.
 - Parse stdout as JSON only.

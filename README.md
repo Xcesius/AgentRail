@@ -181,24 +181,29 @@ Exec defaults:
 
 ## Build
 
-Windows single-binary build:
+Windows single-binary build (requires Go 1.27+ matching `go.mod`):
 
 ```powershell
-set CGO_ENABLED=0
-set GOOS=windows
-set GOARCH=amd64
+$env:CGO_ENABLED = "0"
+$env:GOOS = "windows"
+$env:GOARCH = "amd64"
 go build -trimpath -ldflags "-s -w -buildid=" -o bin/agentrail.exe ./cmd
 ```
 
 Notes:
 
 - `CGO_ENABLED=0` yields a self-contained `.exe` with no external runtime executable dependencies.
-- The Windows build guarantees `exec_process_tree_kill` via Job Object semantics and advertises that capability accordingly.
+- The Windows build guarantees `exec_process_tree_kill` via Job Object semantics (`CREATE_SUSPENDED` assignment before resume, breakaway disallowed) and advertises that capability accordingly.
 
 ## Testing
 
 ```bash
-go test ./...
+go vet ./...
+go fix -diff ./...
+go test -count=1 ./...
+CGO_ENABLED=1 go test -race -count=1 ./...
+go test -run='^$' -fuzz='^FuzzBuildAndApply' -fuzztime=20s ./internal/patch
+go test -run='^$' -bench='.' -benchmem -benchtime=2s ./internal/...
 ```
 
 Coverage includes:
@@ -209,7 +214,10 @@ Coverage includes:
 - paged reads and file tokens
 - patch token checks, no-op behavior, and atomic validation
 - generated single-file patch building and replace flows
-- exec argv-only execution, timeout handling, and output-budget truncation
+- exec argv-only execution, grandchild process-tree kill, breakaway denial, timeout handling, and output-budget truncation
+- deterministic parallel search across worker counts, recursive `**` globs, LF/CRLF patch fuzzing, and benchmarks
+
+GitHub Actions CI (`.github/workflows/ci.yml`) runs the Ubuntu + Windows test matrix, race detector, Windows containment checks, patch fuzzers, scheduled benchmarks, and cross-platform release artifact builds.
 
 ## License
 
